@@ -1,7 +1,7 @@
 # DataPilot 交付验收报告
 
 > 交付日期：2026-11-04 · 对照《08-开发计划与里程碑》M1-M4 验收脚本
-> 代码：`/Users/mac/Desktop/data-platform/` · 设计文档：`/Users/mac/Desktop/大数据平台设计/`
+> 代码：本仓库 · 设计文档：仓库内 `docs/design/`（原始稿在本地设计文件夹）
 
 ## 一、总体结论
 
@@ -338,7 +338,7 @@ $ ./.venv/bin/python -m pytest tests/ -q
 ## 七、使用入口
 
 ```bash
-cd /Users/mac/Desktop/data-platform
+cd data-platform
 ./.venv/bin/uvicorn app.main:app --port 8100     # http://127.0.0.1:8100
 # 账号: admin/admin123 · engineer/engineer123 · analyst/analyst123 · viewer/viewer123
 ./scripts/reset_demo.sh                           # 一键重置演示环境
