@@ -1,0 +1,10 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+web/node_modules/
+web/dist/
+deploy/data/*.db*
+deploy/data/.fernet_key
+deploy/backups/
+.DS_Store

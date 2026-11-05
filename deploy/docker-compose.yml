@@ -1,0 +1,138 @@
+version: "3.8"
+
+# DataPilot 生产部署（引擎层：真实 Doris/Airflow/MySQL）
+# 平台层：app 自研 FastAPI；前端静态文件由 nginx 提供
+# 用法：docker compose up -d
+
+services:
+  mysql:
+    image: mysql:8.0
+    container_name: datapilot-mysql
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD:-datapilot_root}
+      MYSQL_DATABASE: datapilot
+      MYSQL_USER: datapilot
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD:-datapilot_pass}
+    volumes:
+      - mysql_data:/var/lib/mysql
+    command: --character-set-server=utf8mb4 --collation-server=utf8mb4_unicode_ci
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 10s
+      retries: 10
+
+  doris-fe:
+    image: apache/doris:fe-2.1.0
+    container_name: datapilot-doris-fe
+    environment:
+      FE_SERVERS: "fe1:172.20.80.3:9010"
+      FE_ID: 1
+    ports:
+      - "8030:8030"   # HTTP
+      - "9030:9030"   # MySQL 协议（平台经此查询）
+    volumes:
+      - doris_fe_data:/opt/apache-doris/fe/doris-meta
+    networks:
+      datapilot:
+        ipv4_address: 172.20.80.3
+
+  doris-be:
+    image: apache/doris:be-2.1.0
+    container_name: datapilot-doris-be
+    environment:
+      FE_SERVERS: "fe1:172.20.80.3:9010"
+      BE_ADDR: "172.20.80.4:9050"
+    volumes:
+      - doris_be_data:/opt/apache-doris/be/storage
+    depends_on:
+      - doris-fe
+    networks:
+      datapilot:
+        ipv4_address: 172.20.80.4
+
+  airflow-db:
+    image: postgres:14
+    container_name: datapilot-airflow-db
+    environment:
+      POSTGRES_USER: airflow
+      POSTGRES_PASSWORD: airflow
+      POSTGRES_DB: airflow
+    volumes:
+      - airflow_db_data:/var/lib/postgresql/data
+
+  airflow:
+    image: apache/airflow:2.9-python3.10
+    container_name: datapilot-airflow
+    depends_on: [airflow-db]
+    environment:
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET:-datapilot_airflow_secret}
+      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
+      _AIRFLOW_DB_MIGRATE: "true"
+      _AIRFLOW_WWW_USER_CREATE: "true"
+      _AIRFLOW_WWW_USER_USERNAME: admin
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD:-datapilot_airflow}
+    entrypoint: /bin/bash
+    command:
+      - -c
+      - airflow standalone & sleep 20 && cp -r /opt/factory/. /opt/airflow/dags/ && tail -f /dev/null
+    volumes:
+      - ./airflow:/opt/factory:ro
+      - airflow_dags:/opt/airflow/dags
+    ports:
+      - "8080:8080"
+
+  datax:
+    image: python:3.10-slim
+    container_name: datapilot-datax
+    # DataX 官方包较大（需 Java），此处挂载点约定：宿主机 DATAX_HOME 挂载后平台以子进程调用
+    # 下载: http://datax-opensource.oss-cn-hangzhou.aliyuncs.com/datax.tar.gz
+    entrypoint: ["sleep", "infinity"]
+    volumes:
+      - ${DATAX_HOME:-./datax}:/opt/datax
+
+  app:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    container_name: datapilot-app
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: mysql+pymysql://datapilot:${MYSQL_PASSWORD:-datapilot_pass}@mysql:3306/datapilot
+      SCHEDULER_ENGINE: ${SCHEDULER_ENGINE:-local}   # local | airflow
+      AIRFLOW_URL: http://airflow:8080
+      AIRFLOW_TOKEN: ${AIRFLOW_TOKEN:-}
+      AI_BASE_URL: ${AI_BASE_URL:-}
+      AI_API_KEY: ${AI_API_KEY:-}
+      AI_MODEL: ${AI_MODEL:-deepseek-chat}
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/deploy/data
+
+  nginx:
+    image: nginx:1.25
+    container_name: datapilot-nginx
+    depends_on: [app]
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/conf.d/default.conf:ro
+      - ../web/dist:/usr/share/nginx/html:ro
+
+volumes:
+  mysql_data:
+  doris_fe_data:
+  doris_be_data:
+  airflow_db_data:
+  airflow_dags:
+
+networks:
+  datapilot:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.80.0/24
