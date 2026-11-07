@@ -1,5 +1,9 @@
 # DataPilot · AI-Native 大数据平台
 
+![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)
+![Python](https://img.shields.io/badge/Python-3.10+-3776AB.svg)
+![Vue](https://img.shields.io/badge/Vue-3-4FC08D.svg)
+
 > **AI-Native 大数据平台**：引擎层用成熟开源（可插拔），平台层全自研；自然语言对话贯穿建任务、跑调度、查数据、管资产的全过程。
 > 12 种数据源 · 8 大功能模块 · AI 横切层（13 个工具）· 列级脱敏 · 主机监控 · **90 个测试全绿**
 > 📚 全套设计文档（11 篇：架构 / PRD / 排期 / 部署 / 验收）见 [docs/design/](docs/design/)
@@ -137,3 +141,7 @@ tests/                 # 30 个用例（单元 + e2e）
 2. **AI 权限 = 用户权限**：Agent 以登录用户身份调工具，代码层鉴权而非提示词
 3. **配置驱动**：调度/任务一切以配置记录为准，渲染由平台完成，全程可审计可回滚
 4. **引擎可插拔**：Local→Airflow、内置执行器→DataX、SQLite→Doris，均只换配置不换代码
+
+## 开源协议
+
+本项目基于 [Apache License 2.0](LICENSE) 开源。依赖栈（FastAPI / SQLAlchemy / Vue 3 / Element Plus / ECharts 等）均为 MIT/Apache 等宽松协议，无 copyleft 传染；可自由用于个人与商业项目，唯请保留版权与许可声明。
