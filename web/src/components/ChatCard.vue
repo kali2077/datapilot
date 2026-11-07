@@ -24,7 +24,7 @@
   <!-- 表清单 -->
   <div v-else-if="card.type === 'tables'" class="tables-card">
     <div v-for="(t, i) in card.tables || []" :key="i" class="table-item">
-      <el-icon color="#2563eb"><Grid /></el-icon>
+      <el-icon color="var(--dp-accent)"><Grid /></el-icon>
       <span class="mono" style="font-weight: 600">{{ t.table }}</span>
       <span class="muted">{{ t.comment || '' }}</span>
       <el-tag v-if="t.rows !== undefined" size="small" type="info">{{ t.rows }} 行</el-tag>
@@ -181,9 +181,9 @@ const acting = computed(() => !!props.msg._acting)
   display: flex;
   align-items: center;
   gap: 8px;
-  border: 1px solid #e4e7ec;
+  border: 1px solid var(--dp-border);
   border-radius: 6px;
   padding: 7px 10px;
-  background: #fafbfc;
+  background: var(--dp-bg-subtle);
 }
 </style>

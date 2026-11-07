@@ -24,7 +24,7 @@
         <template v-if="currentId">
           <div v-if="!messages.length && !msgLoading" style="height: 100%; display: flex; align-items: center; justify-content: center">
             <el-empty description="输入问题开始问数，例如：最近 7 天销售额趋势">
-              <template #image><el-icon :size="60" color="#c0c8d4"><ChatLineSquare /></el-icon></template>
+              <template #image><el-icon :size="60" color="var(--dp-border)"><ChatLineSquare /></el-icon></template>
             </el-empty>
           </div>
 
@@ -50,7 +50,7 @@
 
           <div v-if="sending" class="chat-msg-row assistant">
             <div class="chat-bubble-ai">
-              <div class="ai-card" style="display: flex; align-items: center; gap: 10px; color: #667085">
+              <div class="ai-card" style="display: flex; align-items: center; gap: 10px; color: var(--dp-text-3)">
                 <el-icon class="is-loading"><Loading /></el-icon> 正在思考与查询…
               </div>
             </div>

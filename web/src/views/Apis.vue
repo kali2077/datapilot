@@ -23,7 +23,7 @@
                 <el-tag size="small" :type="apiStatusTag(row.status)">{{ apiStatusLabel(row.status) }}</el-tag>
               </template>
             </el-table-column>
-            <el-table-column label="参数" width="90">
+            <el-table-column label="参数" width="90" align="right">
               <template #default="{ row }">{{ (row.params || []).length }}</template>
             </el-table-column>
             <el-table-column label="缓存/上限" width="120">
@@ -64,7 +64,7 @@
                 <el-button link type="primary" icon="CopyDocument" @click="copyText(row.app_key)" />
               </template>
             </el-table-column>
-            <el-table-column prop="rate_limit" label="限流(QPS)" width="100" />
+            <el-table-column prop="rate_limit" label="限流(QPS)" width="100" align="right" />
             <el-table-column prop="ip_whitelist" label="IP 白名单" min-width="130">
               <template #default="{ row }">{{ row.ip_whitelist || '-' }}</template>
             </el-table-column>
@@ -101,7 +101,7 @@
             <el-button icon="Refresh" circle @click="loadLogs()" />
           </div>
           <el-table v-loading="logLoading" :data="logs" stripe>
-            <el-table-column prop="id" label="#" width="70" />
+            <el-table-column prop="id" label="#" width="70" align="right" />
             <el-table-column label="API" width="140">
               <template #default="{ row }">
                 <span class="mono">{{ apiCode(row.api_id) }}</span>
@@ -115,10 +115,10 @@
                 <span class="mono muted">{{ JSON.stringify(row.params || {}) }}</span>
               </template>
             </el-table-column>
-            <el-table-column prop="cost_ms" label="耗时" width="90">
+            <el-table-column prop="cost_ms" label="耗时" width="90" align="right">
               <template #default="{ row }">{{ row.cost_ms }} ms</template>
             </el-table-column>
-            <el-table-column prop="row_count" label="行数" width="80" />
+            <el-table-column prop="row_count" label="行数" width="80" align="right" />
             <el-table-column label="状态" width="90">
               <template #default="{ row }">
                 <el-tag size="small" :type="row.status === 'ok' ? 'success' : 'danger'">{{ row.status }}</el-tag>

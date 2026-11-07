@@ -8,3 +8,4 @@ deploy/data/*.db*
 deploy/data/.fernet_key
 deploy/backups/
 .DS_Store
+.zcode/

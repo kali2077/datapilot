@@ -18,14 +18,14 @@
       <svg :width="layout.width" :height="layout.height" style="display: block; min-width: 100%">
         <defs>
           <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
-            <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8" />
+            <path d="M 0 0 L 10 5 L 0 10 z" style="fill: var(--dp-idle)" />
           </marker>
         </defs>
 
         <!-- 连线 -->
         <g v-for="(e, i) in layout.edges" :key="'e' + i" style="cursor: pointer">
           <path :d="e.d" fill="none" stroke="transparent" stroke-width="12" />
-          <path :d="e.d" fill="none" stroke="#94a3b8" stroke-width="1.5" marker-end="url(#arrow)" />
+          <path :d="e.d" fill="none" style="stroke: var(--dp-idle)" stroke-width="1.5" marker-end="url(#arrow)" />
           <title>{{ e.tip }}</title>
         </g>
 
@@ -36,6 +36,7 @@
             :fill="n.fill" :stroke="n.center ? '#1e40af' : 'none'" stroke-width="2"
             style="filter: drop-shadow(0 1px 2px rgba(16,24,40,0.18))"
           />
+          <!-- 节点填充为主题无关的语义饱和色(承载白字);连线/箭头走 --dp-* 适配浅暗 -->
           <text :x="n.x + NW / 2" :y="n.y + 23" text-anchor="middle" fill="#fff" font-size="13" font-weight="600">
             {{ n.shortName }}
           </text>

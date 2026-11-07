@@ -1,6 +1,6 @@
 <template>
   <el-container class="layout-root" style="height: 100vh">
-    <el-aside class="dark-sidebar" width="220px">
+    <el-aside class="app-sidebar" width="220px">
       <div class="logo">
         <div class="logo-icon">D</div>
         <div>
@@ -38,14 +38,28 @@
     <el-container>
       <el-header class="layout-header" height="56px">
         <div class="header-title">{{ pageTitle }}</div>
-        <div style="display: flex; align-items: center; gap: 12px">
-          <el-icon color="#98a2b3"><UserFilled /></el-icon>
-          <span style="font-weight: 600">{{ auth.displayName }}</span>
-          <el-tag :type="roleTag" size="small" effect="light">{{ roleLabel }}</el-tag>
-          <el-divider direction="vertical" />
-          <el-button link type="danger" @click="onLogout">
-            <el-icon style="margin-right: 4px"><SwitchButton /></el-icon>退出
-          </el-button>
+        <div class="header-actions">
+          <el-tooltip :content="isDark ? '切换到浅色模式' : '切换到暗色模式'" placement="bottom">
+            <el-button text :icon="isDark ? Sunny : Moon" aria-label="切换主题" @click="toggleTheme" />
+          </el-tooltip>
+          <el-dropdown trigger="click">
+            <span class="user-entry">
+              <el-avatar :size="26" class="user-avatar">{{ userInitial }}</el-avatar>
+              <span class="user-name">{{ auth.displayName }}</span>
+              <el-tag :type="roleTag" size="small" effect="light">{{ roleLabel }}</el-tag>
+              <el-icon class="user-caret"><ArrowDown /></el-icon>
+            </span>
+            <template #dropdown>
+              <el-dropdown-menu>
+                <el-dropdown-item disabled>
+                  <el-icon><UserFilled /></el-icon>{{ roleLabel }} · {{ auth.user?.username || auth.displayName }}
+                </el-dropdown-item>
+                <el-dropdown-item divided @click="onLogout">
+                  <el-icon><SwitchButton /></el-icon>退出登录
+                </el-dropdown-item>
+              </el-dropdown-menu>
+            </template>
+          </el-dropdown>
         </div>
       </el-header>
 
@@ -72,7 +86,9 @@
 <script setup>
 import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
+import { Sunny, Moon } from '@element-plus/icons-vue'
 import { useAuthStore, useTabsStore, ROLE_LABEL, ROLE_TAG } from '../store'
+import { useTheme } from '../composables/theme'
 import http from '../api'
 
 const route = useRoute()
@@ -80,6 +96,8 @@ const router = useRouter()
 const auth = useAuthStore()
 const tabs = useTabsStore()
 const menuRef = ref()
+const { isDark, toggle: toggleTheme } = useTheme()
+
 // 中键关闭标签（浏览器习惯）：el-tabs 不透出中键事件，监听原生 auxclick
 function onTabAuxClick(e) {
   if (e.button !== 1) return
@@ -111,9 +129,13 @@ function openBi() { window.open(biUrl.value, '_blank') }
 const roleLabel = computed(() => ROLE_LABEL[auth.role] || auth.role)
 const roleTag = computed(() => ROLE_TAG[auth.role] || 'info')
 const pageTitle = computed(() => route.meta.title || 'DataPilot')
+const userInitial = computed(() => (auth.displayName || 'U').slice(0, 1))
 
-// 路由变化 -> 打开/激活对应标签
+// 路由变化 -> 打开/激活对应标签 + 同步浏览器标签页标题
 watch(() => route.path, (p) => {
+  document.title = route.meta.public
+    ? 'DataPilot 数据平台'
+    : `${route.meta.title || 'DataPilot'} · DataPilot`
   if (route.meta.public) return
   const key = route.meta.tabKey || p
   const title = route.meta.title || '页面'
@@ -135,3 +157,40 @@ function onLogout() {
   router.push('/login')
 }
 </script>
+
+<style scoped>
+.header-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.user-entry {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 6px;
+  transition: background-color 0.1s;
+  outline: none;
+}
+.user-entry:hover {
+  background: var(--dp-accent-soft);
+}
+.user-avatar {
+  background: var(--dp-accent-soft);
+  color: var(--dp-accent);
+  font-size: 13px;
+  font-weight: 600;
+  flex: none;
+}
+.user-name {
+  font-weight: 600;
+  color: var(--dp-text-1);
+  font-size: 13px;
+}
+.user-caret {
+  color: var(--dp-text-3);
+  font-size: 12px;
+}
+</style>

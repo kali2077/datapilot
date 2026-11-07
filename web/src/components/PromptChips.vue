@@ -30,7 +30,7 @@ const sugs = computed(() => suggestionsFor(props.page || route.path))
 }
 .pc-label {
   font-size: 12px;
-  color: #98a2b3;
+  color: var(--dp-text-3);
   flex-shrink: 0;
 }
 .pc-chip {
@@ -42,6 +42,6 @@ const sugs = computed(() => suggestionsFor(props.page || route.path))
 }
 .pc-chip:hover {
   opacity: 0.75;
-  border-color: #2563eb;
+  border-color: var(--dp-accent);
 }
 </style>

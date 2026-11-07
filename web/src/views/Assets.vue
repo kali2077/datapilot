@@ -3,7 +3,7 @@
     <!-- 搜索头 -->
     <div class="page-card" style="margin-bottom: 14px">
       <div style="display: flex; align-items: center; gap: 14px">
-        <div class="logo-icon" style="width: 40px; height: 40px; border-radius: 10px; background: linear-gradient(135deg,#2563eb,#7c3aed); color:#fff; font-weight:700; font-size:20px; display:flex; align-items:center; justify-content:center; flex:none">
+        <div class="asset-hero-icon">
           <el-icon :size="22"><MapLocation /></el-icon>
         </div>
         <div style="flex: 1">
@@ -37,7 +37,7 @@
         <el-table-column prop="owner" label="负责人" width="110">
           <template #default="{ row }">{{ row.owner || '-' }}</template>
         </el-table-column>
-        <el-table-column prop="rows" label="行数" width="120" sortable>
+        <el-table-column prop="rows" label="行数" width="120" sortable align="right">
           <template #default="{ row }">{{ row.rows ?? '-' }}</template>
         </el-table-column>
         <el-table-column label="标签" min-width="200">
@@ -111,7 +111,7 @@ const loading = ref(false)
 const searched = ref(false)
 
 const tags = ref([])
-const tagDlg = reactive({ visible: false, name: '', color: '#409EFF', saving: false })
+const tagDlg = reactive({ visible: false, name: '', color: '#2563eb', saving: false })
 
 async function doSearch() {
   loading.value = true
@@ -142,7 +142,7 @@ async function addTag() {
   }
   tagDlg.saving = true
   try {
-    await http.post('/api/asset/tags', { name: tagDlg.name.trim(), color: tagDlg.color || '#409EFF' })
+    await http.post('/api/asset/tags', { name: tagDlg.name.trim(), color: tagDlg.color || '#2563eb' })
     ElMessage.success('标签已创建')
     tagDlg.name = ''
     loadTags()
@@ -171,3 +171,17 @@ onMounted(() => {
   loadTags()
 })
 </script>
+
+<style scoped>
+.asset-hero-icon {
+  width: 40px;
+  height: 40px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--dp-accent), var(--dp-brand-2));
+  color: #fff;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+}
+</style>

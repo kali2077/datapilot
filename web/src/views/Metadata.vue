@@ -28,7 +28,7 @@
         <el-table-column prop="owner_name" label="负责人" width="110">
           <template #default="{ row }">{{ row.owner_name || '-' }}</template>
         </el-table-column>
-        <el-table-column prop="row_count" label="行数" width="110" sortable>
+        <el-table-column prop="row_count" label="行数" width="110" sortable align="right">
           <template #default="{ row }">{{ row.row_count ?? '-' }}</template>
         </el-table-column>
         <el-table-column prop="last_collected_at" label="采集时间" width="170">

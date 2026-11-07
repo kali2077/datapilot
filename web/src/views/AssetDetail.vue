@@ -179,7 +179,7 @@ const tab = ref('columns')
 const allTags = ref([])
 const selectedTags = ref([])
 const tagSaving = ref(false)
-const newTagDlg = reactive({ visible: false, name: '', color: '#409EFF', saving: false })
+const newTagDlg = reactive({ visible: false, name: '', color: '#2563eb', saving: false })
 
 const sampleRows = computed(() => {
   const s = detail.value?.sample
@@ -225,7 +225,7 @@ async function createTag() {
   }
   newTagDlg.saving = true
   try {
-    await http.post('/api/asset/tags', { name: newTagDlg.name.trim(), color: newTagDlg.color || '#409EFF' })
+    await http.post('/api/asset/tags', { name: newTagDlg.name.trim(), color: newTagDlg.color || '#2563eb' })
     newTagDlg.visible = false
     newTagDlg.name = ''
     await loadAllTags()

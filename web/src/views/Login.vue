@@ -8,30 +8,32 @@
           <div class="brand-sub">AI-Native 大数据平台</div>
         </div>
       </div>
-      <el-form :model="form" size="large" @keyup.enter="doLogin">
-        <el-form-item>
-          <el-input v-model="form.username" placeholder="用户名" :prefix-icon="User" autocomplete="username" />
-        </el-form-item>
-        <el-form-item>
-          <el-input
-            v-model="form.password"
-            type="password"
-            placeholder="密码"
-            :prefix-icon="Lock"
-            show-password
-            autocomplete="current-password"
-          />
-        </el-form-item>
-        <el-button type="primary" size="large" style="width: 100%" :loading="loading" @click="doLogin">
-          登 录
+
+      <form class="login-form" @submit.prevent="doLogin">
+        <label class="field">
+          <span class="field-label">用户名</span>
+          <el-input v-model="form.username" placeholder="输入用户名" :prefix-icon="User"
+                    autocomplete="username" autofocus />
+        </label>
+        <label class="field">
+          <span class="field-label">密码</span>
+          <el-input v-model="form.password" type="password" placeholder="输入密码" :prefix-icon="Lock"
+                    show-password autocomplete="current-password" />
+        </label>
+        <p v-if="loginError" class="form-error" role="alert">{{ loginError }}</p>
+        <el-button native-type="submit" type="primary" size="large" class="submit" :loading="loading">
+          登录
         </el-button>
-      </el-form>
-      <el-divider><span class="muted">默认账号</span></el-divider>
+      </form>
+
+      <el-divider><span class="muted">演示账号 · 点击填充</span></el-divider>
       <div class="accounts">
-        <span v-for="a in demoAccounts" :key="a.u" class="account-chip" @click="fill(a.u, a.p)">
+        <button v-for="a in demoAccounts" :key="a.u" type="button" class="account-chip" @click="fill(a.u, a.p)">
           {{ a.u }} / {{ a.p }}
-        </span>
+        </button>
       </div>
+
+      <p class="trust-line">内部部署平台 · 请勿使用生产凭据测试</p>
     </div>
   </div>
 </template>
@@ -39,7 +41,6 @@
 <script setup>
 import { reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
 import { User, Lock } from '@element-plus/icons-vue'
 import http, { errMsg } from '../api'
 import { useAuthStore } from '../store'
@@ -50,6 +51,7 @@ const auth = useAuthStore()
 
 const form = reactive({ username: '', password: '' })
 const loading = ref(false)
+const loginError = ref('')
 const demoAccounts = [
   { u: 'admin', p: 'admin123' },
   { u: 'engineer', p: 'engineer123' },
@@ -60,21 +62,22 @@ const demoAccounts = [
 function fill(u, p) {
   form.username = u
   form.password = p
+  loginError.value = ''
 }
 
 async function doLogin() {
+  loginError.value = ''
   if (!form.username || !form.password) {
-    ElMessage.warning('请输入用户名和密码')
+    loginError.value = '请输入用户名和密码'
     return
   }
   loading.value = true
   try {
     const res = await http.post('/api/auth/login', { username: form.username, password: form.password })
     auth.setLogin(res.token, res.user)
-    ElMessage.success(`欢迎回来，${res.user.display_name || res.user.username}`)
     router.push(String(route.query.redirect || '/chat'))
   } catch (e) {
-    ElMessage.error(errMsg(e))
+    loginError.value = errMsg(e) || '登录失败,请检查用户名或密码'
   } finally {
     loading.value = false
   }
@@ -87,17 +90,16 @@ async function doLogin() {
   display: flex;
   align-items: center;
   justify-content: center;
-  background:
-    radial-gradient(1200px 500px at 20% -10%, rgba(37, 99, 235, 0.35), transparent 60%),
-    radial-gradient(900px 500px at 90% 110%, rgba(124, 58, 237, 0.28), transparent 60%),
-    #101828;
+  background: var(--dp-bg);
+  padding: 24px;
 }
 .login-card {
   width: 380px;
-  background: #fff;
-  border-radius: 14px;
-  padding: 36px 34px 26px;
-  box-shadow: 0 20px 50px rgba(2, 8, 20, 0.45);
+  background: var(--dp-surface);
+  border: 1px solid var(--dp-border);
+  border-radius: var(--dp-radius-lg);
+  padding: 32px 30px 22px;
+  box-shadow: var(--dp-shadow-pop);
 }
 .login-brand {
   display: flex;
@@ -106,25 +108,51 @@ async function doLogin() {
   margin-bottom: 26px;
 }
 .brand-icon {
-  width: 44px;
-  height: 44px;
-  border-radius: 12px;
-  background: linear-gradient(135deg, #2563eb, #7c3aed);
+  width: 42px;
+  height: 42px;
+  border-radius: 10px;
+  background: linear-gradient(135deg, var(--dp-accent), var(--dp-brand-2));
   color: #fff;
-  font-size: 24px;
+  font-size: 22px;
   font-weight: 700;
   display: flex;
   align-items: center;
   justify-content: center;
+  flex: none;
 }
 .brand-name {
-  font-size: 22px;
+  font-size: 21px;
   font-weight: 700;
-  color: #101828;
+  letter-spacing: -0.02em;
+  color: var(--dp-text-1);
 }
 .brand-sub {
   font-size: 12px;
-  color: #667085;
+  color: var(--dp-text-3);
+}
+.login-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.field-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--dp-text-2);
+}
+.form-error {
+  margin: 0;
+  font-size: 12.5px;
+  color: var(--dp-danger);
+}
+.submit {
+  width: 100%;
+  margin-top: 2px;
 }
 .accounts {
   display: flex;
@@ -132,15 +160,24 @@ async function doLogin() {
   gap: 8px;
 }
 .account-chip {
+  font-family: var(--dp-mono);
   font-size: 12px;
-  color: #475467;
-  background: #f2f4f7;
-  border-radius: 20px;
+  color: var(--dp-text-2);
+  background: var(--dp-bg-subtle);
+  border: 1px solid var(--dp-border-soft);
+  border-radius: var(--dp-radius-sm);
   padding: 3px 10px;
   cursor: pointer;
+  transition: color 0.1s, border-color 0.1s;
 }
 .account-chip:hover {
-  background: #e8effd;
-  color: #2563eb;
+  color: var(--dp-accent);
+  border-color: var(--dp-accent);
+}
+.trust-line {
+  margin: 18px 0 0;
+  text-align: center;
+  font-size: 11px;
+  color: var(--dp-text-3);
 }
 </style>

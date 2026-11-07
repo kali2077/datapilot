@@ -41,7 +41,7 @@
         </div>
         <div v-if="history.length" class="table-list history-list">
           <div v-for="h in history" :key="h.id" class="table-item" @click="applyHistory(h)">
-            <el-icon :color="h.status === 'ok' ? '#67c23a' : '#f56c6c'"><i-ep-Stopwatch /></el-icon>
+            <el-icon :color="h.status === 'ok' ? 'var(--dp-ok)' : 'var(--dp-danger)'"><i-ep-Stopwatch /></el-icon>
             <span class="ellipsis mono tiny">{{ h.sql }}</span>
             <span class="muted tiny">{{ h.row_count }}行</span>
           </div>
@@ -78,7 +78,7 @@
       <div class="page-card" v-loading="running">
         <template v-if="result">
           <div class="toolbar" style="margin-bottom: 8px">
-            <el-tag type="success" effect="dark" size="small">成功</el-tag>
+            <span class="status-cell"><span class="dp-dot ok" />成功</span>
             <span class="muted">{{ result.row_count }} 行 · {{ result.cost_ms }} ms</span>
             <el-tag v-if="result.truncated" type="warning" size="small">已达上限，结果截断</el-tag>
             <span class="muted tiny">数据源: {{ result.datasource }}</span>
@@ -277,6 +277,12 @@ onMounted(() => {
 </script>
 
 <style scoped>
+.status-cell {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12.5px;
+  color: var(--dp-text-2);
+}
 .query-layout {
   display: flex;
   gap: 12px;
@@ -315,16 +321,13 @@ onMounted(() => {
   font-size: 12px;
 }
 .table-item:hover {
-  background: #f0f4ff;
+  background: var(--dp-accent-soft);
 }
 .table-item .ellipsis {
   flex: 1;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.tiny {
-  font-size: 11px;
 }
 .main-col {
   flex: 1;
@@ -334,7 +337,7 @@ onMounted(() => {
   gap: 12px;
 }
 .sql-editor :deep(textarea) {
-  font-family: 'JetBrains Mono', Menlo, Consolas, monospace;
+  font-family: var(--dp-mono);
   font-size: 13px;
 }
 </style>

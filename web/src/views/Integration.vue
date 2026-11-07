@@ -27,7 +27,7 @@
             <span class="mono">
               <el-tag :type="dsTag(row.source?.type)" size="small" effect="plain">{{ row.source?.name || '?' }}</el-tag>
               {{ row.source?.table || row.source?.query || '?' }}
-              <el-icon style="color: #98a2b3; margin: 0 4px; vertical-align: -3px"><Right /></el-icon>
+              <el-icon style="color: var(--dp-text-3); margin: 0 4px; vertical-align: -3px"><Right /></el-icon>
               <el-tag :type="dsTag(row.target?.type)" size="small" effect="plain">{{ row.target?.name || '?' }}</el-tag>
               {{ row.target?.table || '?' }}
             </span>
@@ -330,13 +330,13 @@
       </el-form>
       <div v-if="bulkResult" class="page-card" style="margin-top: 10px">
         <div style="font-weight: 600; margin-bottom: 6px">执行结果</div>
-        <div v-for="c in bulkResult.created" :key="c.table" class="mono tiny" style="color: #67c23a">
+        <div v-for="c in bulkResult.created" :key="c.table" class="mono tiny" style="color: var(--dp-ok)">
           ✅ {{ c.table }} → 任务 #{{ c.job_id }}（v{{ c.version }}，{{ c.status }}）
         </div>
-        <div v-for="c in bulkResult.skipped" :key="'s' + c.table" class="mono tiny" style="color: #98a2b3">
+        <div v-for="c in bulkResult.skipped" :key="'s' + c.table" class="mono tiny" style="color: var(--dp-text-3)">
           ⏭ {{ c.table }}：{{ c.reason }}
         </div>
-        <div v-for="f in bulkResult.failed" :key="'f' + f.table" class="mono tiny" style="color: #f56c6c">
+        <div v-for="f in bulkResult.failed" :key="'f' + f.table" class="mono tiny" style="color: var(--dp-danger)">
           ❌ {{ f.table }}：{{ f.error }}
         </div>
       </div>
@@ -386,7 +386,7 @@
         drag :auto-upload="false" :limit="1" :on-change="onImpPick" :file-list="impDlg.files"
         accept=".csv,.txt,.json,.xlsx,.xls"
       >
-        <el-icon size="42" color="#98a2b3"><UploadFilled /></el-icon>
+        <el-icon size="42" color="var(--dp-text-3)"><UploadFilled /></el-icon>
         <div class="el-upload__text">拖拽文件到此处，或点击选择</div>
         <template #tip>
           <div class="muted tiny">支持 CSV / TXT / JSON（对象数组）/ Excel(.xlsx) · ≤20MB · 首行为表头</div>
@@ -415,10 +415,10 @@
         <div style="font-weight: 600; margin-bottom: 4px">
           导入{{ impDlg.result.error ? '失败' : '成功' }}：{{ impDlg.result.table || '' }}
         </div>
-        <div v-if="!impDlg.result.error" class="mono tiny" style="color: #67c23a">
+        <div v-if="!impDlg.result.error" class="mono tiny" style="color: var(--dp-ok)">
           ✅ {{ impDlg.result.rows }} 行 → {{ impDlg.result.target }}.{{ impDlg.result.table }}（{{ impDlg.result.duration_ms }} ms）
         </div>
-        <div v-else class="mono tiny" style="color: #f56c6c">{{ impDlg.result.error }}</div>
+        <div v-else class="mono tiny" style="color: var(--dp-danger)">{{ impDlg.result.error }}</div>
       </div>
 
       <template #footer>

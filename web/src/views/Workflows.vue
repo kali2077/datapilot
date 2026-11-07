@@ -489,11 +489,11 @@ onMounted(() => {
 
 <style scoped>
 .node-box {
-  border: 1px solid #e4e7ec;
+  border: 1px solid var(--dp-border);
   border-radius: 8px;
   padding: 12px;
   margin-bottom: 12px;
-  background: #fafbfc;
+  background: var(--dp-bg-subtle);
 }
 .node-head {
   display: flex;

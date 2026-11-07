@@ -282,8 +282,8 @@ async function collect(row) {
     const res = await http.post(`/api/datasources/${row.id}/collect`)
     ElMessageBox.alert(
       `<div style="display:flex;gap:28px;justify-content:center;padding:6px 0">
-        <div style="text-align:center"><div style="font-size:26px;font-weight:700;color:#2563eb">${res.tables}</div><div class="muted">表</div></div>
-        <div style="text-align:center"><div style="font-size:26px;font-weight:700;color:#16a34a">${res.columns}</div><div class="muted">字段</div></div>
+        <div style="text-align:center"><div style="font-size:26px;font-weight:700;color:var(--dp-accent)">${res.tables}</div><div class="muted">表</div></div>
+        <div style="text-align:center"><div style="font-size:26px;font-weight:700;color:var(--dp-ok)">${res.columns}</div><div class="muted">字段</div></div>
       </div>`,
       `采集完成：${row.name}`,
       { dangerouslyUseHTMLString: true, confirmButtonText: '知道了' }

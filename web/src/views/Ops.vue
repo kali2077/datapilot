@@ -28,7 +28,7 @@
             <el-table-column prop="logical_date" label="逻辑日期" width="170" />
             <el-table-column label="状态" width="100">
               <template #default="{ row }">
-                <el-tag size="small" :type="statusTag(row.status)" effect="dark">{{ statusLabel(row.status) }}</el-tag>
+                <span class="status-cell" :class="{ failed: row.status === 'failed' }"><span class="dp-dot" :class="({ success: 'ok', failed: 'danger', running: 'run' }[row.status] || 'idle')" />{{ statusLabel(row.status) }}</span>
               </template>
             </el-table-column>
             <el-table-column prop="started_at" label="开始时间" width="165">
@@ -37,7 +37,7 @@
             <el-table-column prop="finished_at" label="结束时间" width="165">
               <template #default="{ row }">{{ row.finished_at || '-' }}</template>
             </el-table-column>
-            <el-table-column label="耗时" width="90">
+            <el-table-column label="耗时" width="90" align="right">
               <template #default="{ row }">{{ timeDiff(row.started_at, row.finished_at) }}</template>
             </el-table-column>
             <el-table-column prop="triggered_by" label="触发人" width="100">
@@ -121,7 +121,7 @@
       <template v-if="instDlg.info">
         <el-descriptions :column="3" size="small" border style="margin-bottom: 14px">
           <el-descriptions-item label="状态">
-            <el-tag size="small" :type="statusTag(instDlg.info.status)" effect="dark">{{ statusLabel(instDlg.info.status) }}</el-tag>
+            <span class="status-cell" :class="{ failed: instDlg.info.status === 'failed' }"><span class="dp-dot" :class="({ success: 'ok', failed: 'danger', running: 'run' }[instDlg.info.status] || 'idle')" />{{ statusLabel(instDlg.info.status) }}</span>
           </el-descriptions-item>
           <el-descriptions-item label="触发方式">{{ triggerLabel(instDlg.info.trigger_type) }}</el-descriptions-item>
           <el-descriptions-item label="触发人">{{ instDlg.info.triggered_by || '-' }}</el-descriptions-item>
@@ -165,10 +165,10 @@
           </el-table-column>
           <el-table-column label="状态" width="95">
             <template #default="{ row }">
-              <el-tag size="small" :type="statusTag(row.status)" effect="dark">{{ statusLabel(row.status) }}</el-tag>
+              <span class="status-cell" :class="{ failed: row.status === 'failed' }"><span class="dp-dot" :class="({ success: 'ok', failed: 'danger', running: 'run' }[row.status] || 'idle')" />{{ statusLabel(row.status) }}</span>
             </template>
           </el-table-column>
-          <el-table-column label="耗时" width="90">
+          <el-table-column label="耗时" width="90" align="right">
             <template #default="{ row }">{{ fmtDuration(row.duration_ms) }}</template>
           </el-table-column>
           <el-table-column label="操作" width="90" fixed="right">
@@ -256,9 +256,6 @@ const records = ref([])
 const recTotal = ref(0)
 const recLoading = ref(false)
 
-function statusTag(s) {
-  return { success: 'success', failed: 'danger', running: 'primary', waiting: 'info', skipped: 'info' }[s] || 'info'
-}
 function statusLabel(s) {
   return { success: '成功', failed: '失败', running: '运行中', waiting: '等待', skipped: '跳过' }[s] || (s || '-')
 }
@@ -441,3 +438,15 @@ onMounted(() => {
   loadChannels()
 })
 </script>
+
+<style scoped>
+.status-cell {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12.5px;
+  color: var(--dp-text-2);
+}
+.status-cell.failed {
+  color: var(--dp-danger);
+}
+</style>

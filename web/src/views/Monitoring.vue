@@ -1,13 +1,18 @@
 <template>
   <div>
-    <!-- ============ 概览卡片 ============ -->
+    <!-- ============ 概览:hero 指标 + 次级卡(非等权重网格) ============ -->
     <el-row :gutter="12" style="margin-bottom: 12px">
-      <el-col :span="4"><div class="page-card stat"><div class="stat-num">{{ sum.rules_total }}</div><div class="stat-label">监控规则</div></div></el-col>
-      <el-col :span="4"><div class="page-card stat"><div class="stat-num">{{ sum.rules_enabled }}</div><div class="stat-label">启用中</div></div></el-col>
-      <el-col :span="4"><div class="page-card stat"><div class="stat-num">{{ sum.checks_24h }}</div><div class="stat-label">24h 检查</div></div></el-col>
-      <el-col :span="4"><div class="page-card stat"><div class="stat-num" :class="{ 'stat-bad': sum.failed_24h > 0 }">{{ sum.failed_24h }}</div><div class="stat-label">24h 失败</div></div></el-col>
-      <el-col :span="4"><div class="page-card stat"><div class="stat-num">{{ sum.pass_rate === null ? '-' : sum.pass_rate + '%' }}</div><div class="stat-label">24h 通过率</div></div></el-col>
-      <el-col :span="4"><div class="page-card stat"><div class="stat-num" :class="{ 'stat-bad': sum.alerts_24h > 0 }">{{ sum.alerts_24h }}</div><div class="stat-label">24h 监控告警</div></div></el-col>
+      <el-col :span="8">
+        <div class="stat-card is-hero">
+          <div class="stat-label">24h 通过率 · 全部规则</div>
+          <div class="stat-num">{{ sum.pass_rate === null ? '-' : sum.pass_rate + '%' }}</div>
+          <div class="stat-sub">共 {{ sum.checks_24h }} 次检查 · 失败 {{ sum.failed_24h }} 次</div>
+        </div>
+      </el-col>
+      <el-col :span="4"><div class="stat-card"><div class="stat-label">24h 检查</div><div class="stat-num">{{ sum.checks_24h }}</div><div class="stat-sub">趋势见「检查记录」</div></div></el-col>
+      <el-col :span="4"><div class="stat-card"><div class="stat-label">监控规则</div><div class="stat-num">{{ sum.rules_total }}</div><div class="stat-sub">启用 {{ sum.rules_enabled }} 条</div></div></el-col>
+      <el-col :span="4"><div class="stat-card"><div class="stat-label">24h 失败</div><div class="stat-num" :class="{ 'is-bad': sum.failed_24h > 0 }">{{ sum.failed_24h }}</div><div class="stat-sub">异常规则 {{ sum.failing_rules?.length || 0 }} 条</div></div></el-col>
+      <el-col :span="4"><div class="stat-card"><div class="stat-label">24h 告警</div><div class="stat-num" :class="{ 'is-bad': sum.alerts_24h > 0 }">{{ sum.alerts_24h }}</div><div class="stat-sub">经告警通道通知</div></div></el-col>
     </el-row>
 
     <el-alert v-if="sum.failing_rules && sum.failing_rules.length" type="error" show-icon :closable="false" style="margin-bottom: 12px">
@@ -64,9 +69,9 @@
             </el-table-column>
             <el-table-column label="最近状态" width="110">
               <template #default="{ row }">
-                <el-tag v-if="row.last_status" size="small" effect="dark" :type="statusTag(row.last_status)">
-                  {{ statusLabel(row.last_status) }}
-                </el-tag>
+                <span v-if="row.last_status" class="status-cell" :class="row.last_status">
+                  <span class="dp-dot" :class="dotClass(row.last_status)" />{{ statusLabel(row.last_status) }}
+                </span>
                 <span v-else class="muted">未检查</span>
               </template>
             </el-table-column>
@@ -115,7 +120,9 @@
             </el-table-column>
             <el-table-column label="状态" width="90">
               <template #default="{ row }">
-                <el-tag size="small" effect="dark" :type="statusTag(row.status)">{{ statusLabel(row.status) }}</el-tag>
+                <span class="status-cell" :class="row.status">
+                  <span class="dp-dot" :class="dotClass(row.status)" />{{ statusLabel(row.status) }}
+                </span>
               </template>
             </el-table-column>
             <el-table-column prop="metric" label="指标" min-width="170" show-overflow-tooltip />
@@ -140,10 +147,10 @@
             <el-button icon="Refresh" circle @click="loadHost" />
           </div>
           <el-row v-if="host" :gutter="12">
-            <el-col :span="6"><div class="page-card stat"><div class="stat-num">{{ host.cpu_percent }}%</div><div class="stat-label">CPU（{{ host.cpu_count }} 核）</div></div></el-col>
-            <el-col :span="6"><div class="page-card stat"><div class="stat-num">{{ host.mem_percent }}%</div><div class="stat-label">内存 {{ host.mem_used_gb }}/{{ host.mem_total_gb }} GB</div></div></el-col>
-            <el-col :span="6"><div class="page-card stat"><div class="stat-num">{{ host.disk_percent }}%</div><div class="stat-label">磁盘 {{ host.disk_used_gb }}/{{ host.disk_total_gb }} GB</div></div></el-col>
-            <el-col :span="6"><div class="page-card stat"><div class="stat-num">{{ host.proc_mem_mb }}</div><div class="stat-label">平台进程内存 MB</div></div></el-col>
+            <el-col :span="6"><div class="stat-card"><div class="stat-label">CPU 占用</div><div class="stat-num" :class="loadClass(host.cpu_percent)">{{ host.cpu_percent }}%</div><div class="stat-sub">{{ host.cpu_count }} 核</div></div></el-col>
+            <el-col :span="6"><div class="stat-card"><div class="stat-label">内存占用</div><div class="stat-num" :class="loadClass(host.mem_percent)">{{ host.mem_percent }}%</div><div class="stat-sub">已用 {{ host.mem_used_gb }}/{{ host.mem_total_gb }} GB</div></div></el-col>
+            <el-col :span="6"><div class="stat-card"><div class="stat-label">磁盘占用</div><div class="stat-num" :class="loadClass(host.disk_percent)">{{ host.disk_percent }}%</div><div class="stat-sub">已用 {{ host.disk_used_gb }}/{{ host.disk_total_gb }} GB</div></div></el-col>
+            <el-col :span="6"><div class="stat-card"><div class="stat-label">平台进程内存</div><div class="stat-num">{{ host.proc_mem_mb }}</div><div class="stat-sub">单位 MB</div></div></el-col>
           </el-row>
           <div v-if="host" class="muted tiny" style="margin-top: 8px">主机启动时间: {{ host.boot_time }}</div>
           <el-empty v-else description="加载中" :image-size="60" />
@@ -262,6 +269,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import * as echarts from 'echarts'
 import http, { errMsg } from '../api'
 import { openAi } from '../ai'
+import { dpAlpha, dpAxisLabel, dpColor, dpLegend, dpSplitLine, dpTooltip, onThemeChange } from '../charts/theme'
 
 const route = useRoute()
 const tab = ref('rules')
@@ -283,8 +291,9 @@ const TYPE_MAP = {
 }
 const typeOptions = Object.entries(TYPE_MAP).map(([v, l]) => ({ v, l }))
 const typeLabel = (t) => TYPE_MAP[t] || t
-const statusTag = (s) => ({ passed: 'success', failed: 'danger', error: 'warning' }[s] || 'info')
+const dotClass = (s) => ({ passed: 'ok', failed: 'danger', error: 'warn' }[s] || 'idle')
 const statusLabel = (s) => ({ passed: '通过', failed: '失败', error: '异常' }[s] || s)
+const loadClass = (p) => (p >= 90 ? 'is-bad' : p >= 80 ? 'is-warn' : '')
 
 const dlg = reactive({ visible: false, isEdit: false, id: null, saving: false })
 const form = reactive({
@@ -299,9 +308,38 @@ const groups = computed(() => [...new Set(rules.value.map((r) => r.group_name).f
 const filteredRules = computed(() =>
   groupFilter.value ? rules.value.filter((r) => r.group_name === groupFilter.value) : rules.value)
 
-// ---- 趋势图 ----
+// ---- 趋势图(时间序列 → 堆叠面积,主题色运行时解析) ----
 const trendEl = ref(null)
 let trendChart = null
+let lastTrend = null
+let offTheme = null
+
+function drawTrend(d) {
+  if (!trendEl.value) return
+  if (!trendChart) trendChart = echarts.init(trendEl.value)
+  trendChart.setOption({
+    grid: { left: 40, right: 16, top: 30, bottom: 26 },
+    tooltip: dpTooltip(),
+    legend: dpLegend({ top: 0, right: 0 }),
+    xAxis: {
+      type: 'category', data: d.days.map((b) => b.day),
+      axisLabel: dpAxisLabel(), axisLine: { lineStyle: { color: dpColor('border') } },
+    },
+    yAxis: { type: 'value', minInterval: 1, axisLabel: dpAxisLabel(), splitLine: dpSplitLine() },
+    series: [
+      { name: '通过', type: 'line', stack: 's', symbol: 'none', lineStyle: { width: 1.5 },
+        data: d.days.map((b) => b.passed), itemStyle: { color: dpColor('ok') },
+        areaStyle: { color: dpAlpha('ok', 0.15) } },
+      { name: '失败', type: 'line', stack: 's', symbol: 'none', lineStyle: { width: 1.5 },
+        data: d.days.map((b) => b.failed), itemStyle: { color: dpColor('danger') },
+        areaStyle: { color: dpAlpha('danger', 0.22) } },
+      { name: '异常', type: 'line', stack: 's', symbol: 'none', lineStyle: { width: 1.5 },
+        data: d.days.map((b) => b.error), itemStyle: { color: dpColor('warn') },
+        areaStyle: { color: dpAlpha('warn', 0.22) } },
+    ],
+  }, true)
+  trendChart.resize()
+}
 
 async function loadTrend() {
   if (!trendEl.value) return
@@ -309,23 +347,8 @@ async function loadTrend() {
     const d = await http.get('/api/monitor/trend', {
       params: { days: 7, rule_id: checkQ.rule_id || undefined },
     })
-    if (!trendChart) trendChart = echarts.init(trendEl.value)
-    trendChart.setOption({
-      grid: { left: 40, right: 16, top: 30, bottom: 26 },
-      tooltip: { trigger: 'axis' },
-      legend: { top: 0 },
-      xAxis: { type: 'category', data: d.days.map((b) => b.day) },
-      yAxis: { type: 'value', minInterval: 1 },
-      series: [
-        { name: '通过', type: 'bar', stack: 's', data: d.days.map((b) => b.passed),
-          itemStyle: { color: '#67c23a' }, barMaxWidth: 30 },
-        { name: '失败', type: 'bar', stack: 's', data: d.days.map((b) => b.failed),
-          itemStyle: { color: '#f56c6c' } },
-        { name: '异常', type: 'bar', stack: 's', data: d.days.map((b) => b.error),
-          itemStyle: { color: '#e6a23c' } },
-      ],
-    }, true)
-    trendChart.resize()
+    lastTrend = d
+    drawTrend(d)
   } catch { /* 趋势加载失败不阻塞记录表 */ }
 }
 
@@ -516,6 +539,7 @@ async function removeRule(row) {
 onBeforeUnmount(() => clearInterval(hostTimer))
 onMounted(async () => {
   window.addEventListener('resize', onResize)
+  offTheme = onThemeChange(() => { if (lastTrend) drawTrend(lastTrend) })
   datasources.value = await http.get('/api/datasources')
   workflows.value = await http.get('/api/sched/workflows')
   await loadRules()
@@ -527,32 +551,28 @@ onMounted(async () => {
 
 onBeforeUnmount(() => {
   window.removeEventListener('resize', onResize)
+  if (offTheme) offTheme()
   if (trendChart) { trendChart.dispose(); trendChart = null }
 })
 </script>
 
 <style scoped>
-.stat {
-  text-align: center;
-  padding: 14px 0;
+.status-cell {
+  display: inline-flex;
+  align-items: center;
+  font-size: 12.5px;
+  color: var(--dp-text-2);
 }
-.stat-num {
-  font-size: 26px;
-  font-weight: 700;
-  color: #1d2939;
+.status-cell.failed {
+  color: var(--dp-danger);
 }
-.stat-num.stat-bad {
-  color: #f56c6c;
+.status-cell.error {
+  color: var(--dp-warn);
 }
-.stat-label {
-  font-size: 12px;
-  color: #98a2b3;
-  margin-top: 2px;
+.stat-num.is-bad {
+  color: var(--dp-danger);
 }
-.tiny {
-  font-size: 11px;
-}
-.mono {
-  font-family: 'JetBrains Mono', Menlo, Consolas, monospace;
+.stat-num.is-warn {
+  color: var(--dp-warn);
 }
 </style>
