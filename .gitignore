@@ -9,3 +9,4 @@ deploy/data/.fernet_key
 deploy/backups/
 .DS_Store
 .zcode/
+deploy/data/uploads/
