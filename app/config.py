@@ -42,7 +42,12 @@ DATAX_HOME = os.getenv("DATAX_HOME", "")
 # LLM：OpenAI 兼容接口（DeepSeek/Qwen 等均可）。不配置时使用内置规则引擎
 AI_BASE_URL = os.getenv("AI_BASE_URL", "")      # 如 https://api.deepseek.com/v1
 AI_API_KEY = os.getenv("AI_API_KEY", "")
-AI_MODEL = os.getenv("AI_MODEL", "deepseek-chat")
+AI_MODEL = os.getenv("AI_MODEL", "deepseek-flash")
+
+# 聊天附件：落盘 DATA_DIR/uploads/chat，图片直接进 vision，文本读入 prompt
+ATTACH_DIR = os.path.join(DATA_DIR, "uploads", "chat")
+os.makedirs(ATTACH_DIR, exist_ok=True)
+ATTACH_MAX_MB = int(os.getenv("ATTACH_MAX_MB", "10"))
 
 # 告警默认发件（可在告警通道中逐条配置覆盖）
 SMTP_HOST = os.getenv("SMTP_HOST", "")

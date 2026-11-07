@@ -30,14 +30,27 @@
 
           <div v-for="m in messages" :key="m.id" class="chat-msg-row" :class="m.role">
             <template v-if="m.role === 'user'">
-              <div class="chat-bubble-user">{{ m.content }}</div>
+              <div class="chat-bubble-user">
+                <div v-if="m.attachments?.length" class="msg-atts">
+                  <template v-for="a in m.attachments" :key="a.id">
+                    <el-image v-if="a.type === 'image'" class="msg-att-img" :src="attUrl(a)"
+                              :preview-src-list="[attUrl(a)]" preview-teleported hide-on-click-modal fit="cover" />
+                    <a v-else class="msg-att-file" :href="attUrl(a)" target="_blank">
+                      <el-icon><component :is="attIcon(a.type)" /></el-icon>{{ a.name }}
+                    </a>
+                  </template>
+                </div>{{ m.content }}
+              </div>
             </template>
             <template v-else>
               <div class="chat-bubble-ai">
                 <div class="ai-card">
                   <div class="ai-content">{{ m.content }}</div>
                   <ChatCard v-if="m.card && m.card.type" :msg="m" @confirm="doConfirm(m)" @cancel="doCancel(m)" />
-                  <div class="ai-meta" v-if="m.provider || m.ts">
+                  <div class="ai-meta" v-if="m.provider || m.ts || m.content">
+                    <el-tooltip content="复制回复" placement="top">
+                      <el-icon class="copy-btn" @click="copyMsg(m)"><DocumentCopy /></el-icon>
+                    </el-tooltip>
                     <el-tag v-if="providerLabel(m.provider)" size="small" type="info" effect="plain">
                       {{ providerLabel(m.provider) }}
                     </el-tag>
@@ -59,22 +72,14 @@
         <el-empty v-else description="选择或新建一个会话" />
       </div>
 
-      <div class="chat-input-area">
-        <PromptChips v-if="currentId" page="/chat" @pick="input = $event" />
-        <div style="display: flex; gap: 10px; align-items: flex-end">
-          <el-input
-            v-model="input" type="textarea" :autosize="{ minRows: 1, maxRows: 5 }" resize="none"
-            placeholder="输入问题，Enter 发送，Shift+Enter 换行" :disabled="sending || !currentId"
-            @keydown.enter.exact.prevent="send"
-          />
-          <el-button type="primary" size="large" :loading="sending" :disabled="!currentId || !input.trim()" @click="send">
-            发送
-          </el-button>
-        </div>
-        <div class="muted" style="margin-top: 6px">
-          智能问数支持查数据 / 查表结构 / 创建同步任务 / 触发与暂停工作流 / 发布 API（高危操作需确认）
-        </div>
-      </div>
+      <ChatInput ref="inputRef" :session-id="currentId" :sending="sending" :disabled="!currentId"
+                 placeholder="输入问题，Enter 发送，Shift+Enter 换行"
+                 hint="智能问数支持查数据 / 查表结构 / 创建同步任务 / 发布 API（高危操作需确认）"
+                 @send="onSend">
+        <template #top>
+          <PromptChips v-if="currentId" page="/chat" @pick="inputRef?.setText($event)" />
+        </template>
+      </ChatInput>
     </div>
   </div>
 </template>
@@ -82,21 +87,40 @@
 <script setup>
 import { nextTick, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { DocumentCopy } from '@element-plus/icons-vue'
 import http, { errMsg } from '../api'
+import { copyText } from '../utils/clipboard'
+import { useAuthStore } from '../store'
 import ChatCard from '../components/ChatCard.vue'
+import ChatInput from '../components/ChatInput.vue'
 import PromptChips from '../components/PromptChips.vue'
 
+const auth = useAuthStore()
 const sessions = ref([])
 const sessLoading = ref(false)
 const creating = ref(false)
 const currentId = ref(null)
 const messages = ref([])
 const msgLoading = ref(false)
-const input = ref('')
+const inputRef = ref(null)
 const sending = ref(false)
 const msgBox = ref(null)
 
 let localSeq = -1
+
+// 附件 URL 带 token（img/label 无法携带 Authorization 头）
+function attUrl(a) {
+  return `${a.url}?token=${auth.token}`
+}
+
+function attIcon(t) {
+  return { table: 'Grid', doc: 'Reading' }[t] || 'Document'
+}
+
+async function copyMsg(m) {
+  const ok = await copyText(m.content || '')
+  ok ? ElMessage.success('已复制') : ElMessage.error('复制失败，请手动选择文本')
+}
 
 function providerLabel(p) {
   if (!p) return ''
@@ -160,15 +184,15 @@ async function removeSession(s) {
   }
 }
 
-async function send() {
-  const text = input.value.trim()
-  if (!text || sending.value || !currentId.value) return
-  input.value = ''
-  messages.value.push({ id: localSeq--, role: 'user', content: text })
+async function onSend({ text, attachments = [] }) {
+  if (sending.value || !currentId.value) return
+  messages.value.push({ id: localSeq--, role: 'user', content: text, attachments })
   scrollToBottom()
   sending.value = true
   try {
-    const res = await http.post(`/api/chat/sessions/${currentId.value}/send`, { text, page: '/chat' })
+    const res = await http.post(`/api/chat/sessions/${currentId.value}/send`, {
+      text, page: '/chat', attachments: attachments.map((a) => a.id),
+    })
     messages.value.push({
       id: res.message_id ?? localSeq--,
       role: 'assistant',
@@ -180,6 +204,7 @@ async function send() {
     })
     scrollToBottom()
     loadSessions() // 标题可能已更新
+    inputRef.value?.clear()
   } catch (e) {
     messages.value.push({ id: localSeq--, role: 'assistant', content: `请求失败：${errMsg(e)}`, provider: '' })
     scrollToBottom()

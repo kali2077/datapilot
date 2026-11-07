@@ -5,6 +5,7 @@
 - create 类工具只产草稿 + 返回确认卡片，用户确认后才上线（HITL 红线）
 - 只读工具免确认直接执行
 """
+import base64
 import datetime
 import json
 import re
@@ -18,6 +19,7 @@ from ..models import (DataSource, MetaTable, MetaColumn, GlossaryTerm, FewShot,
                       ApiDef, ChatMessage, AuditLog, MonitorRule, MonitorCheck)
 from .. import config
 from . import sqlguard, meta_service, integ_service, sched_service, llm as llm_mod
+from .attach_parse import kind_of
 from .engine_registry import run_query
 
 MAX_ROUNDS = 8
@@ -662,10 +664,41 @@ def build_context(db: Session, user, user_text: str, session_id: int, page: str 
 
 # ---------------------------------------------------------------- Agent Loop
 
-def chat_once(db: Session, user, session_id: int, text: str, page: str = "") -> dict:
-    start_user_msg = ChatMessage(session_id=session_id, role="user", content=text)
+def chat_once(db: Session, user, session_id: int, text: str, page: str = "",
+              attachments: list = None) -> dict:
+    attachments = attachments or []
+    att_meta = [{"id": a.id, "name": a.name, "type": kind_of(a.name, a.mime or ""),
+                 "size": a.size, "url": f"/api/chat/attachments/{a.id}"} for a in attachments]
+    start_user_msg = ChatMessage(session_id=session_id, role="user", content=text,
+                                 meta=({"attachments": att_meta} if att_meta else None))
     db.add(start_user_msg)
     db.commit()
+
+    # 附件注入：解析类用落库的 extract;纯文本读盘截断;图片转 base64 data URL 走 vision
+    att_text = ""
+    images = []
+    for a in attachments:
+        if (a.mime or "").startswith("image/") or kind_of(a.name, a.mime or "") == "image":
+            try:
+                raw = open(a.path, "rb").read()
+                images.append(f"data:{a.mime or 'image/png'};base64,{base64.b64encode(raw).decode()}")
+            except OSError:
+                pass
+            continue
+        if a.extract:
+            att_text += f"\n\n[用户附件 {a.name}]\n{a.extract[:200_000]}"
+            continue
+        try:
+            raw = open(a.path, "rb").read()
+        except OSError:
+            continue
+        content = raw[:200_000].decode("utf-8", errors="replace")
+        note = "\n…（内容过长已截断）" if len(raw) > 200_000 else ""
+        att_text += f"\n\n[用户附件 {a.name}]\n{content}{note}"
+
+    # 附件文本总预算:防止多个大附件撑爆模型上下文
+    if len(att_text) > 200_000:
+        att_text = att_text[:200_000] + "\n\n…（附件内容总量过大,已截断;请分条发送或精简附件）"
 
     system, ctx = build_context(db, user, text, session_id, page=page)
     provider = llm_mod.get_llm()
@@ -680,7 +713,13 @@ def chat_once(db: Session, user, session_id: int, text: str, page: str = "") -> 
     messages = [{"role": "system", "content": system}]
     for m in history[:-1]:
         messages.append({"role": m.role, "content": (m.content or "")[:4000]})
-    messages.append({"role": "user", "content": text})
+    user_text = text + att_text
+    if images and not rule_mode:
+        messages.append({"role": "user", "content":
+                         [{"type": "text", "text": user_text}] +
+                         [{"type": "image_url", "image_url": {"url": u}} for u in images]})
+    else:
+        messages.append({"role": "user", "content": user_text})
 
     tool_specs = [{"name": t["name"], "description": t["description"],
                    "parameters": t["parameters"]} for t in TOOLS
@@ -732,6 +771,11 @@ def chat_once(db: Session, user, session_id: int, text: str, page: str = "") -> 
             reply = last_result.get("summary", "操作完成。")
         else:
             reply = "未能理解该请求，请换个说法或查看帮助。"
+
+    if rule_mode and attachments:
+        names = "、".join(a.name for a in attachments)
+        reply += (f"\n\n（已收到附件：{names}。当前为离线规则引擎，无法解析附件内容；"
+                  "配置 AI_BASE_URL / AI_API_KEY 后可分析。）")
 
     msg = ChatMessage(session_id=session_id, role="assistant", content=reply,
                       llm_provider=llm_mod.provider_name())

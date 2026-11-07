@@ -15,4 +15,7 @@ pyhive>=0.7
 thrift>=0.16
 thrift-sasl>=0.4.3
 pyodps>=0.12
+openpyxl
+pypdf>=4
+python-docx
 pytest

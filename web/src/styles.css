@@ -609,6 +609,103 @@ button:focus-visible {
   background: var(--dp-surface);
 }
 
+/* 聊天附件:输入区 chips + 消息回显(ai-chat 规范:附件一等公民) */
+.att-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.att-chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--dp-bg-subtle);
+  border: 1px solid var(--dp-border-soft);
+  border-radius: var(--dp-radius-sm);
+  padding: 4px 8px;
+  font-size: 12px;
+  color: var(--dp-text-2);
+  max-width: 240px;
+}
+.att-chip.uploading {
+  opacity: 0.6;
+}
+.att-chip .att-thumb {
+  width: 36px;
+  height: 36px;
+  border-radius: 4px;
+  flex: none;
+}
+.att-chip .att-file-icon {
+  color: var(--dp-text-3);
+  flex: none;
+}
+.att-chip .att-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.att-chip .att-size {
+  color: var(--dp-text-3);
+  font-size: 11px;
+  flex: none;
+  font-variant-numeric: tabular-nums;
+}
+.att-chip .att-remove {
+  cursor: pointer;
+  color: var(--dp-text-3);
+  flex: none;
+}
+.att-chip .att-remove:hover {
+  color: var(--dp-danger);
+}
+.chat-input-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+/* 用户气泡内的附件回显 */
+.msg-atts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 6px;
+  justify-content: flex-end;
+}
+.msg-att-img {
+  width: 120px;
+  height: 90px;
+  border-radius: var(--dp-radius-sm);
+  cursor: pointer;
+}
+.msg-att-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.15);
+  border-radius: var(--dp-radius-sm);
+  padding: 3px 8px;
+  text-decoration: none;
+}
+.msg-att-file:hover {
+  background: rgba(255, 255, 255, 0.25);
+}
+/* AI 回复内联操作(复制) */
+.copy-btn {
+  cursor: pointer;
+  color: var(--dp-text-3);
+  font-size: 14px;
+  margin-left: auto;
+  transition: color 0.1s;
+}
+.copy-btn:hover {
+  color: var(--dp-accent);
+}
+
 /* 确认卡片 */
 .confirm-card {
   border: 1px solid var(--dp-accent-soft);

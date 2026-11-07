@@ -30,14 +30,27 @@
 
           <div v-for="m in messages" :key="m.id" class="chat-msg-row" :class="m.role">
             <template v-if="m.role === 'user'">
-              <div class="chat-bubble-user">{{ m.content }}</div>
+              <div class="chat-bubble-user">
+                <div v-if="m.attachments?.length" class="msg-atts">
+                  <template v-for="a in m.attachments" :key="a.id">
+                    <el-image v-if="a.type === 'image'" class="msg-att-img" :src="attUrl(a)"
+                              :preview-src-list="[attUrl(a)]" preview-teleported hide-on-click-modal fit="cover" />
+                    <a v-else class="msg-att-file" :href="attUrl(a)" target="_blank">
+                      <el-icon><component :is="attIcon(a.type)" /></el-icon>{{ a.name }}
+                    </a>
+                  </template>
+                </div>{{ m.content }}
+              </div>
             </template>
             <template v-else>
               <div class="chat-bubble-ai">
                 <div class="ai-card">
                   <div class="ai-content">{{ m.content }}</div>
                   <ChatCard v-if="m.card && m.card.type" :msg="m" @confirm="doConfirm(m)" @cancel="doCancel(m)" />
-                  <div class="ai-meta" v-if="m.provider || m.ts">
+                  <div class="ai-meta" v-if="m.provider || m.ts || m.content">
+                    <el-tooltip content="复制回复" placement="top">
+                      <el-icon class="copy-btn" @click="copyMsg(m)"><DocumentCopy /></el-icon>
+                    </el-tooltip>
                     <el-tag v-if="providerLabel(m.provider)" size="small" type="info" effect="plain">
                       {{ providerLabel(m.provider) }}
                     </el-tag>
@@ -59,22 +72,14 @@
         <el-empty v-else description="选择或新建一个会话" />
       </div>
 
-      <div class="chat-input-area">
-        <PromptChips page="/ai-assistant" @pick="input = $event" />
-        <div style="display: flex; gap: 10px; align-items: flex-end">
-          <el-input
-            v-model="input" type="textarea" :autosize="{ minRows: 1, maxRows: 5 }" resize="none"
-            placeholder="向 AI 助手下指令，Enter 发送（创建类操作需在对话中确认）" :disabled="sending || !currentId"
-            @keydown.enter.exact.prevent="send"
-          />
-          <el-button type="primary" size="large" :loading="sending" :disabled="!currentId || !input.trim()" @click="send">
-            发送
-          </el-button>
-        </div>
-        <div class="muted" style="margin-top: 6px">
-          AI 助手横切全部模块：数据集成 / 数据开发 / 调度运维 / 数据监控 / 数据资产 / 数据服务（高危操作需确认）
-        </div>
-      </div>
+      <ChatInput ref="inputRef" :session-id="currentId" :sending="sending" :disabled="!currentId"
+                 placeholder="向 AI 助手下指令，Enter 发送（创建类操作需在对话中确认）"
+                 hint="AI 助手横切全部模块：数据集成 / 数据开发 / 调度运维 / 监控 / 数据服务（高危操作需确认）"
+                 @send="onSend">
+        <template #top>
+          <PromptChips page="/ai-assistant" @pick="inputRef?.setText($event)" />
+        </template>
+      </ChatInput>
     </div>
   </div>
 </template>
@@ -83,10 +88,15 @@
 import { nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
+import { DocumentCopy } from '@element-plus/icons-vue'
 import http, { errMsg } from '../api'
+import { copyText } from '../utils/clipboard'
+import { useAuthStore } from '../store'
 import ChatCard from '../components/ChatCard.vue'
+import ChatInput from '../components/ChatInput.vue'
 import PromptChips from '../components/PromptChips.vue'
 
+const auth = useAuthStore()
 const route = useRoute()
 const sessions = ref([])
 const sessLoading = ref(false)
@@ -94,11 +104,25 @@ const creating = ref(false)
 const currentId = ref(null)
 const messages = ref([])
 const msgLoading = ref(false)
-const input = ref('')
+const inputRef = ref(null)
 const sending = ref(false)
 const msgBox = ref(null)
 
 let localSeq = -1
+
+// 附件 URL 带 token（img/label 无法携带 Authorization 头）
+function attUrl(a) {
+  return `${a.url}?token=${auth.token}`
+}
+
+function attIcon(t) {
+  return { table: 'Grid', doc: 'Reading' }[t] || 'Document'
+}
+
+async function copyMsg(m) {
+  const ok = await copyText(m.content || '')
+  ok ? ElMessage.success('已复制') : ElMessage.error('复制失败，请手动选择文本')
+}
 
 function providerLabel(p) {
   if (!p) return ''
@@ -162,16 +186,14 @@ async function removeSession(s) {
   }
 }
 
-async function send() {
-  const text = input.value.trim()
-  if (!text || sending.value || !currentId.value) return
-  input.value = ''
-  messages.value.push({ id: localSeq--, role: 'user', content: text })
+async function onSend({ text, attachments = [] }) {
+  if (sending.value || !currentId.value) return
+  messages.value.push({ id: localSeq--, role: 'user', content: text, attachments })
   scrollToBottom()
   sending.value = true
   try {
     const res = await http.post(`/api/chat/sessions/${currentId.value}/send`, {
-      text, page: '/ai-assistant',
+      text, page: '/ai-assistant', attachments: attachments.map((a) => a.id),
     })
     messages.value.push({
       id: res.message_id ?? localSeq--,
@@ -184,6 +206,7 @@ async function send() {
     })
     scrollToBottom()
     loadSessions() // 标题可能已更新
+    inputRef.value?.clear()
   } catch (e) {
     messages.value.push({ id: localSeq--, role: 'assistant', content: `请求失败：${errMsg(e)}`, provider: '' })
     scrollToBottom()
@@ -242,12 +265,12 @@ onMounted(async () => {
   }
   // 模块快捷入口预填指令（/ai-assistant?prefill=...）
   if (route.query.prefill) {
-    input.value = String(route.query.prefill)
+    inputRef.value?.setText(String(route.query.prefill))
   }
 })
 
 // 已停留在本页时，快捷入口跳转（仅 query 变化）也动态填充
 watch(() => route.query.prefill, (v) => {
-  if (v) input.value = String(v)
+  if (v) inputRef.value?.setText(String(v))
 })
 </script>

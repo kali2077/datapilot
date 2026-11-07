@@ -98,12 +98,17 @@ Base URL: `http://127.0.0.1:8100`（开发模式 Vite proxy 到 8100）
 前端入口：左侧导航「智能应用」→「智能问数」**子导航**（问数对话 /chat · SQL 示例 /fewshots · 术语库 /glossary）
 与「AI 助手」/ai-assistant；顶部标签条可多页并存切换。
 SQL 示例与术语库为问数 RAG 知识库管理页（术语族展开 + few-shot 注入见 build_context）。
-- GET `/api/chat/sessions`；POST `/api/chat/sessions`；DELETE `/api/chat/sessions/{id}`
-- GET `/api/chat/sessions/{id}/messages` → [{id,role,content,card,confirm_token,confirm_status,provider,ts}]
-- POST `/api/chat/sessions/{id}/send` {text, page?} → {message_id,content,card,confirm_token,confirm_status,provider,error}
+- GET `/api/chat/sessions`；POST `/api/chat/sessions`；DELETE `/api/chat/sessions/{id}`（级联删除消息与附件文件）
+- GET `/api/chat/sessions/{id}/messages` → [{id,role,content,card,attachments,confirm_token,confirm_status,provider,ts}]
+- POST `/api/chat/sessions/{id}/send` {text, page?, attachments?: [attachment_id]} → {message_id,content,card,confirm_token,confirm_status,provider,error}
   - page: 当前页面路由（如 /integration），注入 system 提示让 AI 感知上下文
+  - attachments: 附件 id 列表（≤6，须属于当前会话；文本/解析类内容注入 prompt，图片走 vision content）
   - card.type: table{columns,rows,sql,chart{x,y[]},datasource} / tables{tables[]} / schema{columns[]} / confirm{action,title,display(键值对),payload,trial,issues,ddl,sql,plan} / tables+text / job_link{workflow_id,job_id} / instance_link / api_link / instance{instance_id,workflow,status,trigger_type,error,nodes[]} / monitor{rules_total,checks_24h,failed_24h,failing[]} / monitor_check{rule,status,metric,message}
   - AI 工具共 13 个：query_data / search_metadata / get_table_schema / create_sync_job / create_etl_job / run_job / pause_job / resume_job / rerun_job / publish_api / get_instance_detail / monitor_overview / run_monitor_check
+- POST `/api/chat/sessions/{id}/attachments` multipart(file) → {id,name,type(image/table/doc/text),size,url,meta{rows,cols|pages}}
+  - 支持：图片 png/jpg/webp/gif；表格 xlsx（openpyxl 解析，全列名+前 100 行）；文档 pdf（pypdf，限 30 页）/docx；文本 txt/md/csv/tsv/json/log/sql/py/sh/yaml/xml/html/ini/conf/toml
+  - 限额：文本类 ≤2MB，其余 ≤10MB（ATTACH_MAX_MB 可覆盖）；解析失败返回 400
+- GET `/api/chat/attachments/{id}?token=` → 文件流（img src 等 URL 场景用 query token 鉴权，Owner 或 admin）
 - POST `/api/chat/sessions/{id}/confirm` {message_id,token} → {ok,summary,card,message_id}
 - POST `/api/chat/sessions/{id}/cancel` {message_id,token}
 

@@ -38,6 +38,17 @@ def current_user(request: Request, db: Session = Depends(get_db)) -> User:
     return user
 
 
+def current_user_query(token: str = "", db: Session = Depends(get_db)) -> User:
+    """URL 直接引用场景（如 <img src> 无法携带 Authorization 头）的鉴权：token 走 query 参数。"""
+    payload = decode_token(token) if token else None
+    if not payload:
+        raise HTTPException(401, "未登录或登录已过期")
+    user = db.get(User, int(payload["sub"]))
+    if not user or user.status != "active":
+        raise HTTPException(401, "未登录或登录已过期")
+    return user
+
+
 def require_role(min_role: str):
     def dep(user: User = Depends(current_user)) -> User:
         if ROLE_LEVEL.get(user.role, 0) < ROLE_LEVEL.get(min_role, 99):

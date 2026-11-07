@@ -45,6 +45,9 @@ MIGRATIONS = {
         ("last_alerted_at", "DATETIME"),
         ("group_name", "VARCHAR(64) DEFAULT ''"),
     ],
+    "ai_chat_attachment": [
+        ("extract", "TEXT"),
+    ],
 }
 
 

@@ -1,4 +1,4 @@
-from .auth import User, AuditLog, ChatSession, ChatMessage
+from .auth import User, AuditLog, ChatSession, ChatMessage, ChatAttachment
 from .datasource import DataSource, HadoopCluster, MaskRule, SysSetting
 from .meta import MetaTable, MetaColumn, LineageEdge, Tag, TableTag, GlossaryTerm, FewShot
 from .integ import SyncJob, SyncJobVersion, TypeMapping
@@ -9,7 +9,7 @@ from .query import SavedQuery, QueryHistory
 from .monitor import MonitorRule, MonitorCheck
 
 __all__ = [
-    "User", "AuditLog", "ChatSession", "ChatMessage",
+    "User", "AuditLog", "ChatSession", "ChatMessage", "ChatAttachment",
     "DataSource",
     "MetaTable", "MetaColumn", "LineageEdge", "Tag", "TableTag", "GlossaryTerm", "FewShot",
     "SyncJob", "SyncJobVersion", "TypeMapping",

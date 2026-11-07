@@ -47,8 +47,21 @@ class ChatMessage(Base):
     role: Mapped[str] = mapped_column(String(16))  # user/assistant/tool
     content: Mapped[str] = mapped_column(Text, default="")
     tool_calls: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
-    meta: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # 卡片/图表/SQL等结构化信息
+    meta: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)  # 卡片/图表/SQL/附件等结构化信息
     confirm_token: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     confirm_status: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)  # pending/confirmed/expired
     llm_provider: Mapped[str] = mapped_column(String(32), default="")
     ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class ChatAttachment(Base):
+    __tablename__ = "ai_chat_attachment"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    session_id: Mapped[int] = mapped_column(Integer, index=True)
+    user_id: Mapped[int] = mapped_column(Integer, index=True)
+    name: Mapped[str] = mapped_column(String(255), default="")
+    mime: Mapped[str] = mapped_column(String(128), default="")
+    size: Mapped[int] = mapped_column(Integer, default=0)
+    path: Mapped[str] = mapped_column(String(512), default="")
+    extract: Mapped[Optional[str]] = mapped_column(Text, nullable=True)  # 表格/文档类上传时解析的文本
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
