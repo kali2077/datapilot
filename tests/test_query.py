@@ -75,3 +75,61 @@ def test_query_audited(client, tokens):
                 json={"datasource_id": ds["id"], "sql": "SELECT 1"})
     r = client.get("/api/audit/logs?action=query.run", headers=H(tokens["admin"]))
     assert r.json()["total"] >= 1
+
+
+def test_meta_schema_for_completion(client, tokens):
+    """SQL 编辑器补全数据：表 + 字段 + 类型。"""
+    ds = _setup(client, tokens)
+    r = client.get(f"/api/meta/schema/{ds['id']}", headers=H(tokens["analyst"]))
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["datasource"] == ds["name"]
+    tb = next(t for t in body["tables"] if t["name"] == "orders")
+    col_names = {c["name"] for c in tb["columns"]}
+    assert {"id", "city", "amount"} <= col_names
+    assert any(c["type"] for c in tb["columns"])
+
+
+def test_meta_schema_404(client, tokens):
+    r = client.get("/api/meta/schema/99999", headers=H(tokens["analyst"]))
+    assert r.status_code == 404
+
+
+def test_assist_rule_mode_generates_sql(client, tokens):
+    """AI 助写（规则引擎模式）：NL → SQL 只生成不执行，结果过只读校验。"""
+    ds = _setup(client, tokens)
+    r = client.post("/api/query/assist", headers=H(tokens["analyst"]),
+                    json={"datasource_id": ds["id"], "text": "查 q_src 的 orders 前5行"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["sql"].upper().startswith("SELECT")
+    assert body["provider"] == "rule-engine"
+    # 不落查询历史（只生成不执行）
+    h = H(tokens["analyst"])
+    hist = client.get("/api/query/history", headers=h).json()
+    assert not any(item["sql"] == body["sql"] for item in hist)
+
+
+def test_assist_validates_readonly(client, tokens):
+    """助写生成结果强制过只读校验（纵深防御）。"""
+    ds = _setup(client, tokens)
+    from unittest.mock import patch
+    from app.services import llm as llm_mod
+
+    class _FakeLLM:
+        def chat(self, messages, tools):
+            from app.services.llm import ChatResult
+            return ChatResult(content="DELETE FROM orders")
+
+    with patch.object(llm_mod, "get_llm", lambda: _FakeLLM()):
+        r = client.post("/api/query/assist", headers=H(tokens["analyst"]),
+                        json={"datasource_id": ds["id"], "text": "删掉 orders 表数据"})
+    assert r.status_code == 400
+    assert "只读" in r.json()["detail"]
+
+
+def test_assist_empty_text(client, tokens):
+    ds = _setup(client, tokens)
+    r = client.post("/api/query/assist", headers=H(tokens["analyst"]),
+                    json={"datasource_id": ds["id"], "text": "  "})
+    assert r.status_code == 400

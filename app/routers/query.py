@@ -4,6 +4,7 @@
 写入类 SQL 由 sqlguard 白名单拦截。
 """
 import time
+import re
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel
@@ -16,6 +17,7 @@ from ..deps import current_user, client_ip
 from ..models import User, DataSource, SavedQuery, QueryHistory
 from ..services import audit as audit_svc
 from ..services import sqlguard
+from ..services import agent, llm as llm_mod
 from ..services.engine_registry import run_query
 
 router = APIRouter(prefix="/api/query", tags=["query"])
@@ -33,6 +35,73 @@ class SaveReq(BaseModel):
     name: str
     datasource_id: int
     sql: str
+
+
+class AssistReq(BaseModel):
+    datasource_id: int = 0
+    text: str
+
+
+def _extract_sql(content: str) -> str:
+    """从 LLM 回复中提取 SQL：优先取 ``` 代码块，否则取正文；剥掉 markdown 修饰。"""
+    text = (content or "").strip()
+    m = re.search(r"```(?:sql)?\s*\n(.+?)\n?```", text, re.S | re.I)
+    if m:
+        text = m.group(1).strip()
+    # 去掉行内首尾的 ``` 残留与末尾分号
+    text = text.replace("```", "").strip().rstrip(";").strip()
+    return text
+
+
+@router.post("/assist")
+def assist(req: AssistReq, request: Request, user: User = Depends(current_user),
+           db: Session = Depends(get_db)):
+    """AI 助写：自然语言 → 只读 SQL，只生成不执行（人审后手动运行，HITL）。
+
+    LLM 模式：上下文注入（元数据/术语/样例）+ 只输出 SQL 的提示词；
+    规则引擎模式：复用 RuleLLM 的查数路由提取 SQL；
+    生成结果强制过 sqlguard 只读校验（纵深防御，执行路径还有一层）。
+    """
+    text = (req.text or "").strip()
+    if not text:
+        raise HTTPException(400, "请描述要查询的内容")
+    ds = db.get(DataSource, req.datasource_id) if req.datasource_id else None
+    system, ctx = agent.build_context(db, user, text, session_id=0, page="/query")
+    provider = llm_mod.get_llm()
+    provider_tag = llm_mod.provider_name()
+    if provider:
+        messages = [
+            {"role": "system", "content": system + "\n"
+             "你是只读 SQL 生成器：根据用户问题生成一条可直接执行的查询 SQL。"
+             "只输出 SQL 本身，不要解释、不要 markdown 代码块、不要分号结尾。"
+             "只允许 SELECT/WITH/SHOW/EXPLAIN；不确定字段时先查用户问题涉及的表结构再写。"},
+            {"role": "user", "content": text},
+        ]
+        try:
+            result = provider.chat(messages, [])
+        except Exception as e:
+            raise HTTPException(400, f"LLM 调用失败: {e}")
+        sql_out = _extract_sql(result.content)
+        if not sql_out:
+            raise HTTPException(400, "未能生成 SQL，请换个描述或手写查询")
+    else:
+        rule = llm_mod.RuleLLM(lambda: ctx)
+        res = rule.chat([{"role": "user", "content": text}], [])
+        if res.tool_calls and res.tool_calls[0].name == "query_data":
+            sql_out = (res.tool_calls[0].arguments or {}).get("sql", "")
+        else:
+            raise HTTPException(400, "规则引擎未能生成该查询的 SQL（可配置 LLM 后重试，或手写查询）")
+        if not sql_out:
+            raise HTTPException(400, "未能生成 SQL，请换个描述或手写查询")
+    # 只读校验（执行路径还会再校验一次）
+    dialect = sqlguard.dialect_of(ds.type) if ds else "sqlite"
+    ok, msg = sqlguard.check_readonly(sql_out, dialect)
+    if not ok:
+        raise HTTPException(400, f"生成的 SQL 未通过只读校验: {msg}")
+    audit_svc.log(db, user, "query.assist", "datasource", ds.id if ds else 0,
+                  {"text": text[:200], "provider": provider_tag}, ip=client_ip(request))
+    return {"sql": sql_out, "provider": provider_tag,
+            "datasource": ds.name if ds else ""}
 
 
 def _record_history(db: Session, user_id: int, ds: DataSource, sql: str,

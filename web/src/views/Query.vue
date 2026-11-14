@@ -57,6 +57,7 @@
           <span class="page-title" style="font-size: 16px">数据查询</span>
           <span class="muted tiny">只读 SELECT · 自动加 LIMIT · Ctrl/Cmd + Enter 执行</span>
           <div class="spacer" />
+          <el-button size="small" icon="MagicStick" @click="openAssist">AI 助写</el-button>
           <el-select v-model="rowLimit" style="width: 110px" size="small">
             <el-option v-for="n in [100, 500, 1000]" :key="n" :label="`上限 ${n} 行`" :value="n" />
           </el-select>
@@ -64,15 +65,7 @@
             运行查询
           </el-button>
         </div>
-        <el-input
-          v-model="sql"
-          type="textarea"
-          :rows="7"
-          class="sql-editor"
-          placeholder="输入只读 SQL，例如：SELECT dt, COUNT(*) AS cnt FROM orders GROUP BY dt ORDER BY dt DESC"
-          @keydown.ctrl.enter.prevent="run"
-          @keydown.meta.enter.prevent="run"
-        />
+        <SqlEditor v-model="sql" :schema="schemaTables" @run="run" />
       </div>
 
       <div class="page-card" v-loading="running">
@@ -124,6 +117,28 @@
         <el-button type="primary" :disabled="!saveName.trim() || !sql.trim()" @click="doSave">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- AI 助写对话框：只生成不执行（HITL） -->
+    <el-dialog v-model="assistVisible" title="AI 助写 —— 自然语言转 SQL" width="520px">
+      <el-input
+        v-model="assistText" type="textarea" :rows="3" maxlength="500"
+        placeholder="用自然语言描述，例如：查每天订单量 Top10 / 统计近 7 天销售额"
+        @keydown.ctrl.enter.prevent="doAssist"
+      />
+      <div v-if="assistError" class="muted tiny" style="color: var(--dp-danger); margin-top: 8px">{{ assistError }}</div>
+      <div v-if="assistSql" class="assist-result">
+        <div class="muted tiny" style="margin-bottom: 6px">
+          生成结果（{{ assistProvider }}）—— 已填入编辑器，<b>请人工确认后再执行</b>
+        </div>
+        <pre class="sql-pre" style="max-height: 160px; overflow: auto">{{ assistSql }}</pre>
+      </div>
+      <template #footer>
+        <el-button @click="assistVisible = false">关闭</el-button>
+        <el-button type="primary" :loading="assisting" :disabled="!assistText.trim() || !dsId" @click="doAssist">
+          生成 SQL
+        </el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -131,6 +146,7 @@
 import { nextTick, onMounted, ref, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import http, { errMsg } from '../api'
+import SqlEditor from '../components/SqlEditor.vue'
 
 const datasources = ref([])
 const dsId = ref(null)
@@ -148,6 +164,14 @@ const pageSize = 100
 const saveVisible = ref(false)
 const saveName = ref('')
 
+const schemaTables = ref([])
+const assistVisible = ref(false)
+const assistText = ref('')
+const assistSql = ref('')
+const assistProvider = ref('')
+const assistError = ref('')
+const assisting = ref(false)
+
 const pagedRows = computed(() => {
   if (!result.value) return []
   const start = (page.value - 1) * pageSize
@@ -164,11 +188,16 @@ async function loadDatasources() {
 
 async function loadMeta() {
   tables.value = []
+  schemaTables.value = []
   if (!dsId.value) return
   try {
     const d = await http.get('/api/meta/tables', { params: { datasource_id: dsId.value, size: 100 } })
     tables.value = d.items || []
   } catch (e) { /* 元数据缺失不阻塞查询 */ }
+  try {
+    const s = await http.get(`/api/meta/schema/${dsId.value}`)
+    schemaTables.value = s.tables || []
+  } catch (e) { /* 补全数据缺失不阻塞查询 */ }
 }
 
 async function loadSaved() {
@@ -269,6 +298,33 @@ function exportCsv() {
   URL.revokeObjectURL(a.href)
 }
 
+function openAssist() {
+  assistError.value = ''
+  assistSql.value = ''
+  assistText.value = ''
+  assistVisible.value = true
+}
+
+async function doAssist() {
+  if (!dsId.value || !assistText.value.trim() || assisting.value) return
+  assisting.value = true
+  assistError.value = ''
+  assistSql.value = ''
+  try {
+    const r = await http.post('/api/query/assist', {
+      datasource_id: dsId.value, text: assistText.value,
+    })
+    assistSql.value = r.sql
+    assistProvider.value = r.provider === 'rule-engine' ? '规则引擎' : r.provider
+    sql.value = r.sql
+    ElMessage.success('SQL 已填入编辑器，请确认后执行')
+  } catch (e) {
+    assistError.value = errMsg(e)
+  } finally {
+    assisting.value = false
+  }
+}
+
 onMounted(() => {
   loadDatasources()
   loadSaved()
@@ -311,6 +367,13 @@ onMounted(() => {
 .history-list {
   max-height: 260px;
 }
+.assist-result {
+  margin-top: 10px;
+  padding: 10px;
+  background: var(--dp-bg-subtle);
+  border: 1px solid var(--dp-border-soft);
+  border-radius: 8px;
+}
 .table-item {
   display: flex;
   align-items: center;
@@ -335,9 +398,5 @@ onMounted(() => {
   display: flex;
   flex-direction: column;
   gap: 12px;
-}
-.sql-editor :deep(textarea) {
-  font-family: var(--dp-mono);
-  font-size: 13px;
 }
 </style>

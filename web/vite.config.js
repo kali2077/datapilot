@@ -17,5 +17,13 @@ export default defineConfig({
   build: {
     outDir: 'dist',
     chunkSizeWarningLimit: 2500,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          // Monaco 独立分包：只在 /query 路由按需加载，且跨版本缓存
+          if (id.includes('node_modules/monaco-editor')) return 'monaco'
+        },
+      },
+    },
   },
 })

@@ -52,6 +52,28 @@ def get_table(table_id: int, user: User = Depends(current_user), db: Session = D
                         for c in cols]}
 
 
+@router.get("/schema/{datasource_id}")
+def get_schema(datasource_id: int, user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """SQL 编辑器智能补全数据：表 + 字段（名称/类型/注释）。"""
+    d = db.get(DataSource, datasource_id)
+    if not d:
+        raise HTTPException(404, "数据源不存在")
+    tables = (db.query(MetaTable)
+                .filter(MetaTable.datasource_id == datasource_id)
+                .order_by(MetaTable.id).limit(200).all())
+    out = []
+    for t in tables:
+        cols = (db.query(MetaColumn)
+                  .filter(MetaColumn.table_id == t.id)
+                  .order_by(MetaColumn.ordinal).limit(60).all())
+        out.append({
+            "name": t.name, "comment": t.comment or t.manual_desc or "",
+            "columns": [{"name": c.name, "type": c.data_type,
+                         "comment": c.comment or c.manual_desc or ""} for c in cols],
+        })
+    return {"datasource": d.name, "tables": out}
+
+
 class TableUpdateReq(BaseModel):
     manual_desc: Optional[str] = None
     owner_name: Optional[str] = None

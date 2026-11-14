@@ -306,6 +306,18 @@ pyflakes 全仓 0 逻辑告警；前端确认：工作流编辑 PUT 不含 nodes
 | 图型切换 | BarChart 泛化为 DataChart（柱状=横向降序 / 折线=保时序+类目多时斜标 / 饼图=首指标 Top11+其他）；ChatCard 表格卡增加图型切换工具栏，默认跟随后端推断 |
 | 导出 | 导出 CSV（UTF-8 BOM，Excel 直开；内容即卡片内已脱敏/已截断数据）+ 导出图片（echarts getDataURL，底色取容器实际背景色适配暗色主题） |
 
+## 二·二十三、查询工作台：Monaco 补全 + AI 助写（2026-11-14）
+
+借鉴对象：Chat2DB（Monaco + schema-aware 补全、NL→SQL 编辑器副驾模式；思想借鉴，无代码引入，其开源协议附加条款不影响本项目）。
+
+| 项 | 说明 |
+|---|---|
+| Monaco 编辑器 | SqlEditor 组件：仅 core+SQL 语言贡献点，worker 走 Vite 本地打包（离线可用不走 CDN）；monaco-editor 锁 0.52.2（0.57 重构了模块布局）；manualChunks 独立分包（~3.2MB 仅 /query 路由按需加载） |
+| schema-aware 补全 | 新端点 /api/meta/schema/{ds_id}（表/字段/类型/注释，限 200 表×60 列）；表名、全字段（标所属表）、`.` 触发单表字段、SQL 关键词；超大 schema 降级只补表名；暗色主题跟随 dp-theme-change |
+| AI 助写 | 新端点 POST /api/query/assist：NL→只读 SQL，**只生成不执行**（HITL）；LLM 模式上下文注入+只输出 SQL，规则模式复用 RuleLLM 查数路由；生成结果强制过 sqlguard 只读校验（执行路径还有一层）；填入编辑器人工确认后运行；不落查询历史 |
+
+验证：pytest **116/116**（新增 6 用例：补全数据/404/助写生成不落历史/非只读拒绝/空文本），build 通过，运行时冒烟（助写/补全/dist 挂载）通过。
+
 ## 三、测试证据
 
 ```
