@@ -64,6 +64,7 @@ docker compose up -d        # MySQL + Doris(FE/BE) + Airflow + DataX + app + ngi
 | `AIRFLOW_URL` / `AIRFLOW_TOKEN` / `AIRFLOW_DAGS_DIR` | — | Airflow 适配器三件套（factory DAG 配置目录） |
 | `DATAX_HOME` | 空（内置执行器） | 设为 DataX 目录后任务版本页渲染 JSON 可真实执行 |
 | `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL` | 空（规则引擎兜底） | OpenAI 兼容接口，DeepSeek/Qwen 均可 |
+| `AI_EMBED_BASE_URL` / `AI_EMBED_MODEL` | 空（词元匹配降级） | 向量检索 RAG（docs/design/09）：配置后启用语义检索，BASE_URL 默认复用 AI_BASE_URL，key 复用 AI_API_KEY；不配置行为不变 |
 | `META_COLLECT_HOURS` | 24 | 元数据定时采集间隔（小时），0=关闭 |
 | `QUERY_TIMEOUT_S` / `QUERY_MAX_ROWS` | 30 / 1000 | 查询熔断与行数上限 |
 | `SMTP_HOST` / `SMTP_PORT` | — | 告警邮件发件默认值（可在告警通道逐条覆盖） |

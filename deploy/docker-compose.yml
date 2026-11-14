@@ -108,6 +108,8 @@ services:
       AI_BASE_URL: ${AI_BASE_URL:-}
       AI_API_KEY: ${AI_API_KEY:-}
       AI_MODEL: ${AI_MODEL:-deepseek-chat}
+      AI_EMBED_BASE_URL: ${AI_EMBED_BASE_URL:-}
+      AI_EMBED_MODEL: ${AI_EMBED_MODEL:-}
     ports:
       - "8000:8000"
     volumes:

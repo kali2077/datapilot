@@ -90,3 +90,20 @@ class FewShot(Base):
     datasource_id: Mapped[int] = mapped_column(Integer, default=0)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+class MetaVec(Base):
+    """向量缓存（RAG 升级③，见 docs/design/09）：被向量化文本 + JSON 数组向量。
+
+    ref_type: table / fewshot / glossary；model 记录产生向量时的 embedder 名
+    （换模型需全量重算，不同 model 的向量共存，检索只取当前 model）。
+    """
+    __tablename__ = "meta_vec"
+    __table_args__ = (UniqueConstraint("ref_type", "ref_id", "model", name="uq_meta_vec"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    ref_type: Mapped[str] = mapped_column(String(16), index=True)
+    ref_id: Mapped[int] = mapped_column(Integer, index=True)
+    text: Mapped[str] = mapped_column(Text, default="")
+    vec: Mapped[str] = mapped_column(Text, default="")  # JSON 数组（sqlite/mysql 通吃）
+    model: Mapped[str] = mapped_column(String(64), default="")
+    updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)

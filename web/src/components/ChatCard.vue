@@ -10,9 +10,19 @@
     <div style="display: flex; align-items: center; gap: 8px; margin-top: 6px">
       <span class="muted">{{ (card.rows || []).length }} 行</span>
       <el-tag v-if="card.datasource" size="small" effect="plain" type="info">数据源: {{ card.datasource }}</el-tag>
+      <span class="flex-1" />
+      <el-button text size="small" icon="Download" @click="exportCsv">导出 CSV</el-button>
     </div>
     <div v-if="card.chart && (card.chart.y || []).length" style="margin-top: 12px">
-      <BarChart :card="card" />
+      <div class="chart-toolbar">
+        <el-radio-group v-model="chartType" size="small">
+          <el-radio-button value="bar">柱状图</el-radio-button>
+          <el-radio-button value="line">折线图</el-radio-button>
+          <el-radio-button value="pie">饼图</el-radio-button>
+        </el-radio-group>
+        <el-button text size="small" icon="Picture" @click="exportPng">导出图片</el-button>
+      </div>
+      <DataChart ref="chartRef" :card="card" :type="chartType" />
     </div>
     <el-collapse v-if="card.sql" style="margin-top: 10px">
       <el-collapse-item title="查看 SQL" name="sql">
@@ -144,8 +154,9 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
-import BarChart from './BarChart.vue'
+import { computed, ref } from 'vue'
+import { ElMessage } from 'element-plus'
+import DataChart from './DataChart.vue'
 
 const props = defineProps({
   msg: { type: Object, required: true },
@@ -153,6 +164,48 @@ const props = defineProps({
 defineEmits(['confirm', 'cancel'])
 
 const card = computed(() => props.msg.card || {})
+
+// 图型切换：默认跟随后端推断（_chart_hint 目前产 bar）；导出内容即卡片内已脱敏/已截断的数据
+const chartType = ref('bar')
+const chartRef = ref(null)
+
+function exportCsv() {
+  const cols = card.value.columns || []
+  const rows = card.value.rows || []
+  const esc = (v) => {
+    const s = v === null || v === undefined ? '' : String(v)
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+  }
+  const csv = [cols.map(esc).join(','), ...rows.map((r) => (r || []).map(esc).join(','))].join('\n')
+  downloadBlob(new Blob(['\ufeff' + csv], { type: 'text/csv;charset=utf-8' }),
+    `${safeName(card.value.datasource)}_result.csv`)
+  ElMessage.success('已导出 CSV')
+}
+
+function exportPng() {
+  const url = chartRef.value?.getDataURL()
+  if (!url) {
+    ElMessage.warning('图表尚未渲染')
+    return
+  }
+  fetch(url).then((r) => r.blob()).then((b) => {
+    downloadBlob(b, `${safeName(card.value.datasource)}_chart.png`)
+    ElMessage.success('已导出图片')
+  })
+}
+
+// 文件名清洗：数据源名可能含 / 空格等非法字符
+function safeName(s) {
+  return String(s || 'query').replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 40) || 'query'
+}
+
+function downloadBlob(blob, name) {
+  const a = document.createElement('a')
+  a.href = URL.createObjectURL(blob)
+  a.download = name
+  a.click()
+  setTimeout(() => URL.revokeObjectURL(a.href), 3000)
+}
 
 const tableRows = computed(() =>
   (card.value.rows || []).map((r) => Object.fromEntries((r || []).map((v, i) => [`c${i}`, v])))
@@ -172,6 +225,15 @@ const acting = computed(() => !!props.msg._acting)
 </script>
 
 <style scoped>
+.flex-1 {
+  flex: 1;
+}
+.chart-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 6px;
+}
 .tables-card {
   display: flex;
   flex-direction: column;

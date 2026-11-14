@@ -1,18 +1,20 @@
+import json
 import os
+import types
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile, File
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 from typing import Optional
 from sqlalchemy.orm import Session
 
 from .. import config
-from ..db import get_db
+from ..db import get_db, SessionLocal
 from ..deps import current_user, current_user_query, client_ip
 from ..models import User, ChatSession, ChatMessage, ChatAttachment
 from ..services import audit as audit_svc
-from ..services.agent import chat_once, execute_confirmation
+from ..services.agent import chat_once, chat_stream, execute_confirmation
 from ..services.attach_parse import kind_of, parse_attachment, TEXT_EXTS
 
 router = APIRouter(prefix="/api/chat", tags=["chat"])
@@ -171,6 +173,47 @@ def send(sid: int, req: SendReq, request: Request, user: User = Depends(current_
                   {"text": req.text[:200], "page": req.page or "",
                    "attachments": [a.name for a in atts]}, ip=client_ip(request))
     return result
+
+
+@router.post("/sessions/{sid}/send_stream")
+def send_stream(sid: int, req: SendReq, request: Request, user: User = Depends(current_user),
+                db: Session = Depends(get_db)):
+    """流式问数（SSE）：事件流 = stage/delta/tool_begin/tool_end/done，
+    数据落库与审计逻辑与同步版 /send 完全一致。"""
+    s = db.get(ChatSession, sid)
+    if not s or s.user_id != user.id:
+        raise HTTPException(404, "会话不存在")
+    if not req.text.strip():
+        raise HTTPException(400, "消息不能为空")
+    if s.title == "新对话":
+        s.title = req.text.strip()[:40]
+        db.commit()
+    atts = _load_attachments(db, sid, user, req.attachments) if req.attachments else []
+    # 响应体生成阶段请求作用域 db 已关闭：把附件拷成普通对象，生成器内用独立会话
+    att_plain = [types.SimpleNamespace(id=a.id, name=a.name, mime=a.mime, size=a.size,
+                                       path=a.path, extract=a.extract) for a in atts]
+    text = req.text.strip()
+    page = req.page or ""
+
+    def gen():
+        session = SessionLocal()
+        try:
+            for ev in chat_stream(session, user, sid, text, page=page, attachments=att_plain):
+                yield f"data: {json.dumps(ev, ensure_ascii=False, default=str)}\n\n"
+            # 审计失败不能污染已完成的流（done 之后误发 error 会让前端把成功当失败）
+            try:
+                audit_svc.log(session, user, "chat.send", "session", sid,
+                              {"text": text[:200], "page": page, "stream": True,
+                               "attachments": [a.name for a in att_plain]}, ip=client_ip(request))
+            except Exception:
+                pass
+        except Exception as e:
+            yield f"data: {json.dumps({'type': 'error', 'message': f'Agent 执行失败: {e}'}, ensure_ascii=False)}\n\n"
+        finally:
+            session.close()
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Acc-Buffering": "no"})
 
 
 @router.post("/sessions/{sid}/confirm")

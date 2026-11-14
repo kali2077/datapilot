@@ -273,6 +273,39 @@ pyflakes 全仓 0 逻辑告警；前端确认：工作流编辑 PUT 不含 nodes
 
 全量 **90/90 passed**。至此复查轮 P0/P1/P2 全清。
 
+## 二·二十一、智能问数流式输出（SSE，2026-11-14）
+
+| 项 | 说明 |
+|---|---|
+| LLM 流式适配 | `OpenAICompatLLM.stream_chat`：SSE 增量解析 + 流式 tool_calls 分片聚合（index 聚合 arguments），结束统一产 ChatResult |
+| Agent 事件流 | `chat_once` 重构为生成器 `chat_stream`（yield stage/delta/tool_begin/tool_end/done），同步版改为消费事件流的包装，**单一代码路径**，落库/审计/HITL 行为不变 |
+| SSE 端点 | `POST /api/chat/sessions/{sid}/send_stream`：生成器内独立 DB 会话（响应阶段请求作用域会话已关），附件拷成普通对象避免 detached 问题；异常转 error 事件 |
+| 前端 | `postSSE`（fetch + ReadableStream 解析，含 401 处理）；Chat/AiAssistant 两页流式气泡：阶段提示逐条展示 + 正文打字机增量 + 光标动画，done 后替换为落库正式消息 |
+| 兼容降级 | 规则引擎模式（无 key）不流式但事件序列完整；非流式 provider 自动走同步 chat() |
+
+验证：pytest **101/101**（新增 SSE 端到端/前置校验/流式 tool_calls 聚合/流式 provider 接入 4 用例），`npm run build` 通过。
+
+## 二·二十二、问数向量检索 RAG + 图型切换/导出（2026-11-14）
+
+### 向量检索 RAG（docs/design/09 ③，按定稿方案落地）
+
+| 项 | 说明 |
+|---|---|
+| 可插拔 Embedder | `services/embedder.py`：OpenAICompatEmbedder（AI_EMBED_BASE_URL/MODEL，key 复用 AI_API_KEY，零安装）+ get_embedder 选择逻辑；未配置返回 None → 行为与②词元版完全一致（红线：部署不被 embedding 模型绑架） |
+| meta_vec 缓存 | 新表（ref_type/ref_id/text/vec(JSON)/model 唯一约束）：sqlite/mysql 通吃，无专用向量库；检索只取最新 model 的向量（换模型旧向量自动失效，全量重算即生效） |
+| 增量刷新钩子 | 元数据采集后（按 ds 增量）/ 表人工补录后（单表）/ 术语·样例 CRUD 后（小集合全刷）；embed 失败静默跳过，业务请求不受影响 |
+| 融合检索 | build_context：词元分×0.4（ov/(1+ov) 保序归一，表名精确提及=满分）+ 余弦分×0.6；表/fewshot/术语三路融合；语义命中术语并入②同义词族展开与命中注入 |
+| LocalEmbedder | 未实现（文档 09 中为可选项，ONNX ~100MB，需要时再补） |
+
+验收（文档 09 标准）：语义样例集（营收→GMV 表、营收怎么算→GMV 样例，词面零重叠）启用后全部召回（test_rag_vector 7 用例）；关闭后行为与②一致；embed API 打不通时降级干净。全量 **108/108 passed**。
+
+### 问数图表增强（图型切换 + 导出）
+
+| 项 | 说明 |
+|---|---|
+| 图型切换 | BarChart 泛化为 DataChart（柱状=横向降序 / 折线=保时序+类目多时斜标 / 饼图=首指标 Top11+其他）；ChatCard 表格卡增加图型切换工具栏，默认跟随后端推断 |
+| 导出 | 导出 CSV（UTF-8 BOM，Excel 直开；内容即卡片内已脱敏/已截断数据）+ 导出图片（echarts getDataURL，底色取容器实际背景色适配暗色主题） |
+
 ## 三、测试证据
 
 ```

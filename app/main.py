@@ -55,8 +55,15 @@ def create_app() -> FastAPI:
                 sched_service.rebuild_jobs(db)
             finally:
                 db.close()
+        vec_ok = False
+        try:
+            from .services.embedder import get_embedder
+            vec_ok = get_embedder() is not None
+        except Exception:
+            pass
         print(f"[DataPilot] v{config.VERSION} 启动完成 | 调度引擎: {config.SCHEDULER_ENGINE} "
-              f"| LLM: {'配置' if config.AI_API_KEY else '规则引擎(离线)'}")
+              f"| LLM: {'配置' if config.AI_API_KEY else '规则引擎(离线)'}"
+              f"| 向量检索: {'启用' if vec_ok else '词元匹配(降级)'}")
 
     # 前端构建产物
     web_dist = os.path.join(config.BASE_DIR, "web", "dist")

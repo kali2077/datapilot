@@ -39,6 +39,9 @@ python3 -m venv .venv && ./.venv/bin/pip install -r requirements.txt
 export AI_BASE_URL=https://api.deepseek.com/v1
 export AI_API_KEY=sk-xxx
 export AI_MODEL=deepseek-chat      # 任何 OpenAI 兼容接口（Qwen 等）均可
+
+# 可选：启用向量检索 RAG（语义召回，见 docs/design/09；key 复用上方 AI_API_KEY）
+export AI_EMBED_MODEL=text-embedding-v3
 ```
 
 ## 接入真实引擎（可选，默认内置执行器即可跑）

@@ -63,6 +63,60 @@ class OpenAICompatLLM:
                                               arguments=args))
         return result
 
+    def stream_chat(self, messages: List[dict], tools: List[dict]):
+        """流式版 chat()：yield {"type":"delta","text":...} 增量，
+        结束时 yield {"type":"result","result":ChatResult}（含聚合后的 tool_calls）。"""
+        import httpx
+        payload = {"model": self.model, "messages": messages, "temperature": 0.2,
+                   "stream": True}
+        if tools:
+            payload["tools"] = [{"type": "function", "function": t} for t in tools]
+            payload["tool_choice"] = "auto"
+        content_parts: List[str] = []
+        tc_acc = {}  # index -> {"id","name","args"}（流式 tool_calls 分片聚合）
+        with httpx.post(
+            f"{self.base_url}/chat/completions",
+            headers={"Authorization": f"Bearer {self.api_key}"},
+            json=payload, timeout=120,
+        ) as resp:
+            resp.raise_for_status()
+            for line in resp.iter_lines():
+                if isinstance(line, bytes):
+                    line = line.decode("utf-8", "replace")
+                line = (line or "").strip()
+                if not line.startswith("data:"):
+                    continue
+                data = line[5:].strip()
+                if data == "[DONE]":
+                    break
+                try:
+                    chunk = json.loads(data)
+                except Exception:
+                    continue
+                delta = (chunk.get("choices") or [{}])[0].get("delta") or {}
+                if delta.get("content"):
+                    content_parts.append(delta["content"])
+                    yield {"type": "delta", "text": delta["content"]}
+                for tc in (delta.get("tool_calls") or []):
+                    idx = tc.get("index", 0)
+                    acc = tc_acc.setdefault(idx, {"id": "", "name": "", "args": ""})
+                    if tc.get("id"):
+                        acc["id"] = tc["id"]
+                    fn = tc.get("function") or {}
+                    if fn.get("name"):
+                        acc["name"] += fn["name"]
+                    if fn.get("arguments"):
+                        acc["args"] += fn["arguments"]
+        result = ChatResult(content="".join(content_parts))
+        for idx in sorted(tc_acc):
+            acc = tc_acc[idx]
+            try:
+                args = json.loads(acc["args"] or "{}")
+            except Exception:
+                args = {}
+            result.tool_calls.append(ToolCall(id=acc["id"], name=acc["name"], arguments=args))
+        yield {"type": "result", "result": result}
+
 
 # ---------------------------------------------------------------- 规则引擎（离线兜底）
 

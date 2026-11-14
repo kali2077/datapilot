@@ -19,6 +19,7 @@ from ..models import (DataSource, MetaTable, MetaColumn, GlossaryTerm, FewShot,
                       ApiDef, ChatMessage, AuditLog, MonitorRule, MonitorCheck)
 from .. import config
 from . import sqlguard, meta_service, integ_service, sched_service, llm as llm_mod
+from . import embedder as emb_mod, meta_vec_service
 from .attach_parse import kind_of
 from .engine_registry import run_query
 
@@ -599,19 +600,41 @@ def _expand_with_glossary(base_toks: set, glossary):
 
 
 def build_context(db: Session, user, user_text: str, session_id: int, page: str = "") -> (str, dict):
+    # 向量命中的相关性下限：真实 embedding 向量任意两文本余弦几乎恒 >0（无关文本 0.3~0.5），
+    # 不设阈会术语/fewshot 恒命中，把不相关内容注入 prompt。词元精确命中（②）不受此限。
+    VEC_HIT_FLOOR = 0.5
     ds_list = db.query(DataSource).all()
     ds_names = [d.name for d in ds_list]
     ds_map = {d.id: d.name for d in ds_list}
     tables = db.query(MetaTable).all()
     scored = []
     glossary = db.query(GlossaryTerm).limit(50).all()
+    # 向量检索（③，见 docs/design/09）：配置了 embedder 才启用；问题向量与 meta_vec 余弦，
+    # 与词元分融合（词元 0.4 + 余弦 0.6）。未配置/调用失败 → q_vec=None，行为与②词元版完全一致。
+    emb = emb_mod.get_embedder()
+    q_vec = meta_vec_service.embed_query(emb, user_text or "")
+    t_vec = meta_vec_service.search(db, q_vec, "table", top_k=20) if q_vec else {}
+    fs_vec = meta_vec_service.search(db, q_vec, "fewshot", top_k=5) if q_vec else {}
+    g_vec = meta_vec_service.search(db, q_vec, "glossary", top_k=5) if q_vec else {}
     # 同义词展开（②）：问题词元命中任一术语族（术语/同义词/定义）→ 整族词元并入检索
     base_toks = set(meta_service.tokenize(user_text or ""))
     toks, hit_terms = _expand_with_glossary(base_toks, glossary)
+    if g_vec:  # 语义命中术语：词面零重叠但语义强相关（cos ≥ 下限）的也并入族展开与命中注入
+        g_by_id = {g.id: g for g in glossary}
+        for gid, c in g_vec.items():
+            g = g_by_id.get(gid)
+            if g and c >= VEC_HIT_FLOOR and g not in hit_terms:
+                hit_terms.append(g)
+                toks |= set(meta_service.tokenize(
+                    f"{g.term} {g.synonyms or ''} {g.definition or ''}"))
     for t in tables:
         t_tokens = set(meta_service.tokenize(t.name + " " + (t.comment or "") + " " + (t.manual_desc or "")))
         overlap = len(toks & t_tokens)
-        scored.append((overlap, t))
+        # 词元分归一化（保序：ov/(1+ov) 单调）；表名被精确提及视为满分，不被语义波动稀释
+        tok_score = 1.0 if (t.name or "").lower() in (user_text or "").lower() \
+            else overlap / (1 + overlap)
+        score = 0.4 * tok_score + 0.6 * t_vec.get(t.id, 0.0)
+        scored.append((score, t))
     scored.sort(key=lambda x: -x[0])
     top = [t for s, t in scored if s > 0][:8] or [t for _, t in scored[:5]]
     schema_txt = []
@@ -626,9 +649,13 @@ def build_context(db: Session, user, user_text: str, session_id: int, page: str 
     fs_scored = []
     for fs in fewshots:
         ov = len(toks & set(meta_service.tokenize(fs.question)))
-        fs_scored.append((ov, fs))
+        cos = fs_vec.get(fs.id, 0.0)
+        score = 0.4 * (ov / (1 + ov)) + 0.6 * cos
+        fs_scored.append((score, fs, ov, cos))
     fs_scored.sort(key=lambda x: -x[0])
-    fs_txt = "\n".join(f"Q: {fs.question}\nSQL: {fs.sql}" for _, fs in fs_scored[:3] if fs_scored and fs_scored[0][0] > 0)
+    # 注入条件：词元命中（②行为不变）或语义强相关（cos ≥ 下限）
+    fs_txt = "\n".join(f"Q: {fs.question}\nSQL: {fs.sql}"
+                       for s, fs, ov, cos in fs_scored[:3] if ov > 0 or cos >= VEC_HIT_FLOOR)
 
     last_sql = ""
     last_msg = (db.query(ChatMessage)
@@ -664,8 +691,17 @@ def build_context(db: Session, user, user_text: str, session_id: int, page: str 
 
 # ---------------------------------------------------------------- Agent Loop
 
-def chat_once(db: Session, user, session_id: int, text: str, page: str = "",
-              attachments: list = None) -> dict:
+def chat_stream(db: Session, user, session_id: int, text: str, page: str = "",
+                attachments: list = None):
+    """流式 Agent Loop：逐段 yield 事件供 SSE 推送。
+
+    事件类型：
+    - {"type": "stage", "text": ...}       阶段提示（检索上下文 / 第N轮思考）
+    - {"type": "delta", "text": ...}       LLM 回复增量（仅流式 provider）
+    - {"type": "tool_begin", "name": ...}  开始执行工具
+    - {"type": "tool_end", "name", "summary", "error"} 工具执行完成
+    - {"type": "done", ...}                最终结果（字段与 chat_once 返回值一致）
+    """
     attachments = attachments or []
     att_meta = [{"id": a.id, "name": a.name, "type": kind_of(a.name, a.mime or ""),
                  "size": a.size, "url": f"/api/chat/attachments/{a.id}"} for a in attachments]
@@ -700,6 +736,7 @@ def chat_once(db: Session, user, session_id: int, text: str, page: str = "",
     if len(att_text) > 200_000:
         att_text = att_text[:200_000] + "\n\n…（附件内容总量过大,已截断;请分条发送或精简附件）"
 
+    yield {"type": "stage", "text": "正在检索元数据、术语与样例…"}
     system, ctx = build_context(db, user, text, session_id, page=page)
     provider = llm_mod.get_llm()
     rule_mode = provider is None
@@ -729,8 +766,12 @@ def chat_once(db: Session, user, session_id: int, text: str, page: str = "",
     for round_i in range(MAX_ROUNDS):
         if rule_mode and round_i > 0:
             break  # 规则引擎单轮：工具结果直接汇总
+        yield {"type": "stage", "text": f"第 {round_i + 1} 轮思考…"}
         try:
-            result = provider.chat(messages, tool_specs)
+            if not rule_mode and hasattr(provider, "stream_chat"):
+                result = yield from _stream_llm(provider, messages, tool_specs)
+            else:
+                result = provider.chat(messages, tool_specs)
         except Exception as e:
             reply = f"LLM 调用失败: {e}"
             break
@@ -740,6 +781,7 @@ def chat_once(db: Session, user, session_id: int, text: str, page: str = "",
         # 执行工具（本轮所有 tool_calls 记入同一条 assistant 消息，符合 OpenAI 规范）
         assistant_tool_calls, tool_messages = [], []
         for tc in result.tool_calls:
+            yield {"type": "tool_begin", "name": tc.name}
             spec = TOOL_MAP.get(tc.name)
             if not spec:
                 tool_out = {"summary": f"未知工具 {tc.name}", "error": True}
@@ -753,6 +795,8 @@ def chat_once(db: Session, user, session_id: int, text: str, page: str = "",
                     tool_out = {"summary": f"工具执行异常: {e}", "error": True}
                 _audit_ai(db, user, tc.name, tc.arguments, tool_out)
             last_result = tool_out
+            yield {"type": "tool_end", "name": tc.name,
+                   "summary": tool_out.get("summary", ""), "error": bool(tool_out.get("error"))}
             assistant_tool_calls.append({"id": tc.id, "type": "function",
                                          "function": {"name": tc.name,
                                                       "arguments": json.dumps(tc.arguments or {}, ensure_ascii=False)}})
@@ -791,9 +835,35 @@ def chat_once(db: Session, user, session_id: int, text: str, page: str = "",
         msg.confirm_status = "pending"
     db.add(msg)
     db.commit()
-    return {"message_id": msg.id, "content": reply, "card": (msg.meta or {}).get("card"),
-            "confirm_token": msg.confirm_token, "confirm_status": msg.confirm_status,
-            "provider": msg.llm_provider, "error": (msg.meta or {}).get("error", False)}
+    yield {"type": "done", "message_id": msg.id, "content": reply, "card": (msg.meta or {}).get("card"),
+           "confirm_token": msg.confirm_token, "confirm_status": msg.confirm_status,
+           "provider": msg.llm_provider, "error": (msg.meta or {}).get("error", False)}
+
+
+def _stream_llm(provider, messages, tool_specs):
+    """流式调 LLM：透传 delta 事件，聚合出 ChatResult（生成器 return 语义）。"""
+    parts, result = [], None
+    for ev in provider.stream_chat(messages, tool_specs):
+        if ev.get("type") == "delta":
+            parts.append(ev["text"])
+            yield {"type": "delta", "text": ev["text"]}
+        elif ev.get("type") == "result":
+            result = ev["result"]
+    if result is None:
+        raise RuntimeError("流式返回缺少 result 事件")
+    if not result.content and parts:
+        result.content = "".join(parts)
+    return result
+
+
+def chat_once(db: Session, user, session_id: int, text: str, page: str = "",
+              attachments: list = None) -> dict:
+    """同步包装：消费 chat_stream 事件流，返回最终结果（行为与旧版完全一致）。"""
+    result = {}
+    for ev in chat_stream(db, user, session_id, text, page=page, attachments=attachments):
+        if ev.get("type") == "done":
+            result = {k: v for k, v in ev.items() if k != "type"}
+    return result
 
 
 def _audit_ai(db: Session, user, tool_name: str, args: dict, result: dict):

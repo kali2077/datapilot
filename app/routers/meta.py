@@ -8,7 +8,7 @@ from ..db import get_db
 from ..deps import current_user, require_role, client_ip
 from ..models import User, MetaTable, MetaColumn, GlossaryTerm, FewShot, DataSource
 from ..services import audit as audit_svc
-from ..services import meta_service
+from ..services import meta_service, meta_vec_service
 
 router = APIRouter(prefix="/api/meta", tags=["meta"])
 
@@ -69,6 +69,7 @@ def update_table(table_id: int, req: TableUpdateReq, request: Request,
         mt.owner_name = req.owner_name
     db.commit()
     meta_service.meta_index.invalidate()
+    meta_vec_service.refresh_tables(db, [table_id])  # 补录描述影响向量，增量重算（未配置 embedder 时 no-op）
     audit_svc.log(db, user, "meta.table.update", "meta_table", table_id,
                   req.dict(exclude_none=True), ip=client_ip(request))
     return {"ok": True}
@@ -95,6 +96,7 @@ def create_glossary(req: GlossaryReq, user: User = Depends(require_role("enginee
                      created_by=user.username)
     db.add(g)
     db.commit()
+    meta_vec_service.refresh_glossary(db)  # RAG ③ 增量刷新（未配置 embedder 时 no-op）
     audit_svc.log(db, user, "glossary.create", "glossary", g.id, {"term": req.term})
     return {"id": g.id}
 
@@ -107,6 +109,7 @@ def update_glossary(gid: int, req: GlossaryReq, user: User = Depends(require_rol
         raise HTTPException(404, "术语不存在")
     g.term, g.synonyms, g.definition = req.term, req.synonyms, req.definition
     db.commit()
+    meta_vec_service.refresh_glossary(db)
     return {"ok": True}
 
 
@@ -117,6 +120,7 @@ def delete_glossary(gid: int, user: User = Depends(require_role("engineer")),
     if g:
         db.delete(g)
         db.commit()
+        meta_vec_service.invalidate_ref(db, "glossary", gid)
     return {"ok": True}
 
 
@@ -143,6 +147,7 @@ def create_fewshot(req: FewShotReq, user: User = Depends(require_role("engineer"
                 datasource_id=req.datasource_id, enabled=req.enabled)
     db.add(f)
     db.commit()
+    meta_vec_service.refresh_fewshots(db)  # RAG ③ 增量刷新（未配置 embedder 时 no-op）
     audit_svc.log(db, user, "fewshot.create", "fewshot", f.id, {"q": req.question[:80]})
     return {"id": f.id}
 
@@ -156,6 +161,7 @@ def update_fewshot(fid: int, req: FewShotReq, user: User = Depends(require_role(
     f.question, f.sql, f.datasource_id, f.enabled = \
         req.question, req.sql, req.datasource_id, req.enabled
     db.commit()
+    meta_vec_service.refresh_fewshots(db)
     return {"ok": True}
 
 
@@ -166,4 +172,5 @@ def delete_fewshot(fid: int, user: User = Depends(require_role("engineer")),
     if f:
         db.delete(f)
         db.commit()
+        meta_vec_service.invalidate_ref(db, "fewshot", fid)
     return {"ok": True}

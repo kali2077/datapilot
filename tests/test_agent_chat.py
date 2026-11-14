@@ -92,3 +92,123 @@ def test_chat_search_metadata(client, tokens):
     body = r.json()
     assert body["card"]["type"] == "tables"
     assert len(body["card"]["tables"]) >= 1
+
+
+def _parse_sse(text: str):
+    """解析 SSE body → 事件列表。"""
+    events = []
+    for part in text.split("\n\n"):
+        for line in part.split("\n"):
+            if line.startswith("data: "):
+                import json
+                events.append(json.loads(line[6:]))
+    return events
+
+
+def test_chat_send_stream_sse(client, tokens):
+    """流式端点：SSE 事件序列完整（stage/tool_end/done），落库结果与同步版一致。"""
+    make_sqlite_ds(client, tokens["engineer"], "c_stream", {ORDERS_DDL: _rows()})
+    h = H(tokens["analyst"])
+    r = client.post("/api/chat/sessions", headers=h)
+    sid = r.json()["id"]
+    r = client.post(f"/api/chat/sessions/{sid}/send_stream", headers=h,
+                    json={"text": "查 c_stream 的 orders 前3行"})
+    assert r.status_code == 200, r.text
+    assert r.headers["content-type"].startswith("text/event-stream")
+    events = _parse_sse(r.text)
+    types = [e["type"] for e in events]
+    assert types[0] == "stage"                      # 上下文检索提示
+    assert "stage" in types[1:-1] or "tool_begin" in types  # 思考轮/工具事件
+    assert any(e["type"] == "tool_begin" and e["name"] == "query_data" for e in events)
+    assert any(e["type"] == "tool_end" and e["name"] == "query_data" for e in events)
+    done = events[-1]
+    assert done["type"] == "done" and done["message_id"]
+    assert done["card"]["type"] == "table" and len(done["card"]["rows"]) == 3
+    # 落库校验：消息与同步版一致（用户+助手各一条，助手带卡片）
+    r = client.get(f"/api/chat/sessions/{sid}/messages", headers=h)
+    msgs = r.json()
+    assert [m["role"] for m in msgs] == ["user", "assistant"]
+    assert msgs[-1]["card"]["type"] == "table"
+
+
+def test_chat_send_stream_errors(client, tokens):
+    """流式端点前置校验：会话不存在 / 空文本返回 HTTP 错误而非事件流。"""
+    h = H(tokens["analyst"])
+    r = client.post(f"/api/chat/sessions/99999/send_stream", headers=h,
+                    json={"text": "hi"})
+    assert r.status_code == 404
+    r = client.post("/api/chat/sessions", headers=h)
+    sid = r.json()["id"]
+    r = client.post(f"/api/chat/sessions/{sid}/send_stream", headers=h,
+                    json={"text": "   "})
+    assert r.status_code == 400
+
+
+def test_openai_stream_chat_parses_sse(monkeypatch):
+    """OpenAICompatLLM.stream_chat：SSE 增量解析 + 流式 tool_calls 分片聚合。"""
+    import httpx
+    from app.services.llm import OpenAICompatLLM
+    lines = [
+        'data: {"choices":[{"delta":{"content":"你"}}]}',
+        '',
+        'data: {"choices":[{"delta":{"content":"好"}}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,"id":"c1",'
+        '"function":{"name":"query_data","arguments":"{\\"datas"}}]}}]}',
+        'data: {"choices":[{"delta":{"tool_calls":[{"index":0,'
+        '"function":{"arguments":"ource\\":\\"db\\"}"}}]}}]}',
+        'data: [DONE]',
+    ]
+
+    class _FakeResp:
+        def raise_for_status(self): pass
+        def iter_lines(self): return iter(lines)
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+
+    monkeypatch.setattr(httpx, "post", lambda url, **kw: _FakeResp())
+    llm = OpenAICompatLLM("http://x", "k", "m")
+    deltas, result = [], None
+    for ev in llm.stream_chat([{"role": "user", "content": "hi"}], []):
+        if ev["type"] == "delta":
+            deltas.append(ev["text"])
+        else:
+            result = ev["result"]
+    assert "".join(deltas) == "你好"
+    assert result.content == "你好"
+    assert result.tool_calls[0].name == "query_data"
+    assert result.tool_calls[0].arguments == {"datasource": "db"}
+
+
+def test_chat_stream_with_streaming_llm(client, tokens, monkeypatch):
+    """接入流式 provider 后：delta 事件逐段透传，工具链路与落库不变。"""
+    from app.services import llm as llm_mod
+    from app.services.llm import ChatResult, ToolCall
+
+    class _FakeStreamLLM:
+        def __init__(self): self.round = 0
+        def stream_chat(self, messages, tools):
+            self.round += 1
+            if self.round == 1:
+                yield {"type": "delta", "text": "正在查询…"}
+                yield {"type": "result", "result": ChatResult(tool_calls=[
+                    ToolCall("t1", "query_data",
+                             {"datasource": "c_stream2", "sql": "SELECT * FROM orders LIMIT 2"})])}
+                return
+            yield {"type": "delta", "text": "查询完成"}
+            yield {"type": "result", "result": ChatResult(content="查询完成，共 2 行。")}
+
+    monkeypatch.setattr(llm_mod, "get_llm", lambda: _FakeStreamLLM())
+    make_sqlite_ds(client, tokens["engineer"], "c_stream2", {ORDERS_DDL: _rows()})
+    h = H(tokens["analyst"])
+    sid = client.post("/api/chat/sessions", headers=h).json()["id"]
+    r = client.post(f"/api/chat/sessions/{sid}/send_stream", headers=h,
+                    json={"text": "查 c_stream2 的 orders 前2行"})
+    events = _parse_sse(r.text)
+    types = [e["type"] for e in events]
+    assert "delta" in types
+    assert [t for t in types if t == "delta"] == ["delta"] * 2  # 两轮各一段增量
+    done = events[-1]
+    assert done["type"] == "done"
+    assert done["content"] == "查询完成，共 2 行。"
+    assert done["card"]["type"] == "table" and len(done["card"]["rows"]) == 2
+    assert done["card"]["sql"].upper().startswith("SELECT")

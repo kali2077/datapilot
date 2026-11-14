@@ -45,28 +45,29 @@
             <template v-else>
               <div class="chat-bubble-ai">
                 <div class="ai-card">
-                  <div class="ai-content">{{ m.content }}</div>
-                  <ChatCard v-if="m.card && m.card.type" :msg="m" @confirm="doConfirm(m)" @cancel="doCancel(m)" />
-                  <div class="ai-meta" v-if="m.provider || m.ts || m.content">
-                    <el-tooltip content="复制回复" placement="top">
-                      <el-icon class="copy-btn" @click="copyMsg(m)"><DocumentCopy /></el-icon>
-                    </el-tooltip>
-                    <el-tag v-if="providerLabel(m.provider)" size="small" type="info" effect="plain">
-                      {{ providerLabel(m.provider) }}
-                    </el-tag>
-                    <span class="muted">{{ m.ts }}</span>
-                  </div>
+                  <template v-if="m.streaming">
+                    <div v-for="(s, i) in m.stages" :key="'st' + i" class="stream-stage">
+                      <el-icon class="is-loading"><Loading /></el-icon><span>{{ s }}</span>
+                    </div>
+                    <div v-if="m.content" class="ai-content stream-text">{{ m.content }}<span class="stream-cursor">▍</span></div>
+                    <div v-else class="muted stream-text">思考中<span class="stream-cursor">…</span></div>
+                  </template>
+                  <template v-else>
+                    <div class="ai-content">{{ m.content }}</div>
+                    <ChatCard v-if="m.card && m.card.type" :msg="m" @confirm="doConfirm(m)" @cancel="doCancel(m)" />
+                    <div class="ai-meta" v-if="m.provider || m.ts || m.content">
+                      <el-tooltip content="复制回复" placement="top">
+                        <el-icon class="copy-btn" @click="copyMsg(m)"><DocumentCopy /></el-icon>
+                      </el-tooltip>
+                      <el-tag v-if="providerLabel(m.provider)" size="small" type="info" effect="plain">
+                        {{ providerLabel(m.provider) }}
+                      </el-tag>
+                      <span class="muted">{{ m.ts }}</span>
+                    </div>
+                  </template>
                 </div>
               </div>
             </template>
-          </div>
-
-          <div v-if="sending" class="chat-msg-row assistant">
-            <div class="chat-bubble-ai">
-              <div class="ai-card" style="display: flex; align-items: center; gap: 10px; color: var(--dp-text-3)">
-                <el-icon class="is-loading"><Loading /></el-icon> 正在思考与查询…
-              </div>
-            </div>
           </div>
         </template>
         <el-empty v-else description="选择或新建一个会话" />
@@ -85,11 +86,11 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, ref, watch } from 'vue'
+import { nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { DocumentCopy } from '@element-plus/icons-vue'
-import http, { errMsg } from '../api'
+import http, { errMsg, nowTs, postSSE } from '../api'
 import { copyText } from '../utils/clipboard'
 import { useAuthStore } from '../store'
 import ChatCard from '../components/ChatCard.vue'
@@ -189,26 +190,38 @@ async function removeSession(s) {
 async function onSend({ text, attachments = [] }) {
   if (sending.value || !currentId.value) return
   messages.value.push({ id: localSeq--, role: 'user', content: text, attachments })
+  // 流式占位气泡：阶段提示 + 增量正文，完成后替换为落库的正式消息
+  const streamMsg = reactive({ id: localSeq--, role: 'assistant', streaming: true, content: '', stages: [] })
+  messages.value.push(streamMsg)
   scrollToBottom()
   sending.value = true
   try {
-    const res = await http.post(`/api/chat/sessions/${currentId.value}/send`, {
+    const done = await postSSE(`/api/chat/sessions/${currentId.value}/send_stream`, {
       text, page: '/ai-assistant', attachments: attachments.map((a) => a.id),
+    }, (ev) => {
+      if (ev.type === 'stage') streamMsg.stages.push(ev.text)
+      else if (ev.type === 'delta') streamMsg.content += ev.text
+      else if (ev.type === 'tool_begin') streamMsg.stages.push(`执行工具 ${ev.name}…`)
+      else if (ev.type === 'tool_end') streamMsg.stages.push(`${ev.name}：${ev.summary || '完成'}`)
+      scrollToBottom()
     })
+    messages.value = messages.value.filter((m) => m !== streamMsg)
     messages.value.push({
-      id: res.message_id ?? localSeq--,
+      id: done.message_id ?? localSeq--,
       role: 'assistant',
-      content: res.content || '',
-      card: res.card || null,
-      confirm_token: res.confirm_token || null,
-      confirm_status: res.confirm_status || '',
-      provider: res.provider || '',
+      content: done.content || '',
+      card: done.card || null,
+      confirm_token: done.confirm_token || null,
+      confirm_status: done.confirm_status || '',
+      provider: done.provider || '',
+      ts: nowTs(),
     })
     scrollToBottom()
     loadSessions() // 标题可能已更新
     inputRef.value?.clear()
   } catch (e) {
-    messages.value.push({ id: localSeq--, role: 'assistant', content: `请求失败：${errMsg(e)}`, provider: '' })
+    messages.value = messages.value.filter((m) => m !== streamMsg)
+    messages.value.push({ id: localSeq--, role: 'assistant', content: `请求失败：${e.message || errMsg(e)}`, provider: '' })
     scrollToBottom()
   } finally {
     sending.value = false

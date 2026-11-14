@@ -44,6 +44,12 @@ AI_BASE_URL = os.getenv("AI_BASE_URL", "")      # 如 https://api.deepseek.com/v
 AI_API_KEY = os.getenv("AI_API_KEY", "")
 AI_MODEL = os.getenv("AI_MODEL", "deepseek-flash")
 
+# 向量检索 RAG（可插拔 Embedder，见 docs/design/09）：
+# 配置 AI_EMBED_MODEL(+BASE_URL，默认复用 AI_BASE_URL；key 复用 AI_API_KEY) 即启用语义检索；
+# 不配置自动降级回词元匹配，行为与词元版完全一致。部署永不被 embedding 模型绑架。
+AI_EMBED_BASE_URL = os.getenv("AI_EMBED_BASE_URL", "")
+AI_EMBED_MODEL = os.getenv("AI_EMBED_MODEL", "")
+
 # 聊天附件：落盘 DATA_DIR/uploads/chat，图片直接进 vision，文本读入 prompt
 ATTACH_DIR = os.path.join(DATA_DIR, "uploads", "chat")
 os.makedirs(ATTACH_DIR, exist_ok=True)

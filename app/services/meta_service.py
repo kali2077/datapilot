@@ -7,6 +7,7 @@ from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from ..models import DataSource, MetaTable, MetaColumn, Tag, TableTag
+from . import meta_vec_service
 
 
 def _dtype_str(col: dict) -> str:
@@ -15,7 +16,21 @@ def _dtype_str(col: dict) -> str:
 
 
 def collect_datasource(db: Session, ds: DataSource, with_samples: bool = False) -> dict:
-    """采集指定数据源的库表结构。保留人工补录字段（manual_desc/owner）。"""
+    """采集指定数据源的库表结构。保留人工补录字段（manual_desc/owner）。
+
+    所有采集入口（API / 定时采集 / 任务成功后 / 目标表采集 / 播种）共用本函数，
+    向量增量刷新（RAG ③）在此统一触发；未配置 embedder 时为 no-op。
+    """
+    result = _collect_impl(db, ds, with_samples)
+    try:
+        ids = [r.id for r in db.query(MetaTable.id).filter(MetaTable.datasource_id == ds.id)]
+        meta_vec_service.refresh_tables(db, ids)
+    except Exception:
+        pass  # 向量刷新失败不影响采集结果（红线：不被 embedding 模型绑架）
+    return result
+
+
+def _collect_impl(db: Session, ds: DataSource, with_samples: bool = False) -> dict:
     if ds.type == "maxcompute":
         return _collect_maxcompute(db, ds)
     from .engine_registry import get_engine
