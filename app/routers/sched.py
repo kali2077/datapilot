@@ -81,8 +81,31 @@ def create_wf(req: WorkflowReq, request: Request,
         db.flush()
         ids.append(node.id)
     db.commit()
-    # SQL 节点校验
+    # upstream 归一化：前端按节点名引用上游，统一解析为节点 id（同工作流内）
     problems = []
+    nodes_all = db.query(WorkflowNode).filter(WorkflowNode.workflow_id == wf.id).all()
+    name_map = {n.name: n.id for n in nodes_all if n.name}
+    for node in nodes_all:
+        ups = node.upstream or []
+        resolved = []
+        for up in ups:
+            if up in name_map and name_map[up] != node.id:
+                resolved.append(name_map[up])          # 名字引用 → id
+            elif isinstance(up, int) and up in name_map.values() and up != node.id:
+                resolved.append(up)                    # 已是 id
+            elif str(up).isdigit() and int(up) in name_map.values() and int(up) != node.id:
+                resolved.append(int(up))
+            else:
+                problems.append(f"节点 {node.name}: 上游 {up} 不存在，已忽略")
+        if resolved != ups:
+            node.upstream = resolved
+    if problems:
+        db.commit()
+    # 依赖环检测（拓扑排序失败即存在环）
+    try:
+        task_runner.topo_sort(nodes_all)
+    except ValueError as e:
+        problems.append(str(e))
     for node in db.query(WorkflowNode).filter(WorkflowNode.workflow_id == wf.id):
         if node.node_type == "sql":
             cfg = node.config or {}

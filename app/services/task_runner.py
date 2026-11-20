@@ -23,16 +23,21 @@ def _append_log(db: Session, run_id: int, text_: str):
 
 
 def topo_sort(nodes: List[WorkflowNode]) -> List[WorkflowNode]:
-    ids = {n.id for n in nodes}
-    by_id = {n.id: n for n in nodes}
+    """拓扑排序。upstream 兼容两种历史形态：节点 id（当前约定）与节点名（早期前端存名）。"""
+    by_key = {}
+    for n in nodes:
+        by_key[n.id] = n
+        by_key[n.name] = n  # 名字映射（历史数据兼容；同名时后者覆盖，按 name 去重场景可接受）
     indeg = {n.id: 0 for n in nodes}
     children = {n.id: [] for n in nodes}
     for n in nodes:
         for up in (n.upstream or []):
-            if up in ids:
+            up_node = by_key.get(up)
+            if up_node is not None and up_node.id != n.id:
                 indeg[n.id] += 1
-                children[up].append(n.id)
+                children[up_node.id].append(n.id)
     order, queue = [], [nid for nid, d in indeg.items() if d == 0]
+    by_id = {n.id: n for n in nodes}
     while queue:
         nid = queue.pop(0)
         order.append(by_id[nid])

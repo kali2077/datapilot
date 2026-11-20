@@ -150,9 +150,12 @@ def _build_dag(cfg: dict) -> DAG:
                 op_kwargs={"workflow_id": cfg["workflow_id"], "node_id": node["id"]},
             )
             tasks[node["id"]] = t
+            tasks[node.get("name")] = t  # 兼容旧配置：upstream 可能存节点名而非 id
+            tasks[f"{node['id']}_{node['name']}"] = t
+        for node in cfg.get("nodes", []):
             for up in node.get("upstream", []):
-                if up in tasks:
-                    tasks[up] >> t
+                if tasks.get(up) and tasks.get(up) is not tasks.get(node["id"]):
+                    tasks[up] >> tasks[node["id"]]
         # 空工作流占位
         if not tasks:
             PythonOperator(task_id="noop", python_callable=lambda: None)

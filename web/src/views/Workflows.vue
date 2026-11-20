@@ -173,6 +173,15 @@
 
         <h4 style="margin: 4px 0 8px">节点列表（{{ detailDlg.info.nodes?.length || 0 }}）</h4>
         <el-table :data="detailDlg.info.nodes || []" size="small" border>
+          <el-table-column type="expand">
+            <template #default="{ row }">
+              <div style="padding: 10px 14px">
+                <pre v-if="row.config?.sql" class="sql-pre">{{ row.config.sql }}</pre>
+                <pre v-else-if="row.config?.script" class="sql-pre">{{ row.config.script }}</pre>
+                <div v-else class="muted">该节点无可展示脚本（DataX 节点请在数据集成页查看同步配置）</div>
+              </div>
+            </template>
+          </el-table-column>
           <el-table-column prop="name" label="节点" min-width="130" />
           <el-table-column label="类型" width="80">
             <template #default="{ row }"><el-tag size="small" effect="plain">{{ row.node_type }}</el-tag></template>

@@ -456,6 +456,41 @@ def test_trend_sync_halt_and_chunk_compare(client, tokens):
     client.delete(f"/api/integ/jobs/{job_id}?force=true", headers=h)
 
 
+def test_etl_node_upstream_order(client, tokens):
+    """节点依赖真实生效：b（声明在前）依赖 a → 必须 a 先执行。
+
+    历史 bug：前端 upstream 存节点名，后端按 id 匹配——依赖被静默忽略、按创建顺序执行。
+    """
+    import os
+    import tempfile
+    marker = tempfile.mktemp(prefix="etl_order_")
+    h = H(tokens["engineer"])
+    r = client.post("/api/sched/workflows", headers=h, json={
+        "name": "etl_upstream_order", "schedule_cron": "",
+        "nodes": [
+            {"name": "b", "node_type": "python",
+             "config": {"script": f"content = open(r'{marker}').read()\n"
+                                  f"assert content == 'A', content\nprint('B-ok')"},
+             "upstream": ["a"]},
+            {"name": "a", "node_type": "python",
+             "config": {"script": f"open(r'{marker}', 'w').write('A')\nprint('A-ok')"},
+             "upstream": []},
+        ]})
+    assert r.status_code == 200, r.text
+    assert r.json()["problems"] == [], r.json()["problems"]
+    wf_id = r.json()["id"]
+    r = client.post(f"/api/sched/workflows/{wf_id}/trigger", headers=h)
+    inst = wait_instance(client, tokens["engineer"], r.json()["instance_id"])
+    assert inst["status"] == "success", inst.get("error")
+    # upstream 已归一化为节点 id（名字引用 → id）
+    r = client.get(f"/api/sched/workflows/{wf_id}", headers=h)
+    nb = next(n for n in r.json()["nodes"] if n["name"] == "b")
+    na = next(n for n in r.json()["nodes"] if n["name"] == "a")
+    assert nb["upstream"] == [na["id"]]
+    client.delete(f"/api/sched/workflows/{wf_id}?force=true", headers=h)
+    os.path.exists(marker) and os.remove(marker)
+
+
 def test_cron_validation_and_permissions(client, tokens):
     h = H(tokens["engineer"])
     r = client.post("/api/sched/workflows", headers=h, json={
