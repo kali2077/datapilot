@@ -34,6 +34,72 @@ class WfUpdateReq(BaseModel):
     schedule_cron: Optional[str] = None
     depends_on: Optional[list] = None
     enabled: Optional[bool] = None
+    nodes: Optional[list] = None  # 提供时整体替换工作流节点
+
+
+def _normalize_upstream(db: Session, wf: Workflow) -> list:
+    """upstream 名字引用归一化为节点 id + 依赖环检测；返回 problems。"""
+    problems = []
+    nodes_all = (db.query(WorkflowNode).filter(WorkflowNode.workflow_id == wf.id)
+                   .order_by(WorkflowNode.ordinal).all())
+    name_map = {n.name: n.id for n in nodes_all if n.name}
+    id_set = set(name_map.values())
+    for node in nodes_all:
+        ups = node.upstream or []
+        resolved = []
+        for up in ups:
+            if up in name_map and name_map[up] != node.id:
+                resolved.append(name_map[up])          # 名字引用 → id
+            elif isinstance(up, int) and up in id_set and up != node.id:
+                resolved.append(up)                    # 已是 id
+            elif str(up).isdigit() and int(up) in id_set and int(up) != node.id:
+                resolved.append(int(up))
+            else:
+                problems.append(f"节点 {node.name}: 上游 {up} 不存在，已忽略")
+        if resolved != ups:
+            node.upstream = resolved
+    db.commit()
+    try:
+        task_runner.topo_sort(nodes_all)
+    except ValueError as e:
+        problems.append(str(e))
+    return problems
+
+
+def _validate_wf_nodes(db: Session, wf: Workflow) -> list:
+    """SQL 节点校验（数据源存在性 + ETL SQL 合法性）；返回 problems。"""
+    problems = []
+    for node in db.query(WorkflowNode).filter(WorkflowNode.workflow_id == wf.id):
+        if node.node_type != "sql":
+            continue
+        cfg = node.config or {}
+        ds_id = cfg.get("datasource_id")
+        from ..models import DataSource
+        ds = db.get(DataSource, ds_id) if ds_id else None
+        if not ds:
+            problems.append(f"节点 {node.name}: 数据源不存在")
+            continue
+        ok, msg = sqlguard.check_etl_sql(cfg.get("sql", ""), cfg.get("target_table", ""),
+                                         sqlguard.dialect_of(ds.type))
+        if not ok:
+            problems.append(f"节点 {node.name}: {msg}")
+    return problems
+
+
+def _replace_wf_nodes(db: Session, wf: Workflow, nodes: list) -> list:
+    """整体替换工作流节点（PUT nodes 语义）；返回 problems。"""
+    db.query(WorkflowNode).filter(WorkflowNode.workflow_id == wf.id).delete()
+    db.flush()
+    for i, n in enumerate(nodes):
+        node = WorkflowNode(workflow_id=wf.id, name=n.get("name", "node"),
+                            node_type=n.get("node_type", "sql"),
+                            config=n.get("config", {}), upstream=n.get("upstream", []),
+                            ordinal=i)
+        db.add(node)
+        db.flush()
+    problems = _normalize_upstream(db, wf)
+    problems += _validate_wf_nodes(db, wf)
+    return problems
 
 
 class ChannelReq(BaseModel):
@@ -81,44 +147,9 @@ def create_wf(req: WorkflowReq, request: Request,
         db.flush()
         ids.append(node.id)
     db.commit()
-    # upstream 归一化：前端按节点名引用上游，统一解析为节点 id（同工作流内）
-    problems = []
-    nodes_all = db.query(WorkflowNode).filter(WorkflowNode.workflow_id == wf.id).all()
-    name_map = {n.name: n.id for n in nodes_all if n.name}
-    for node in nodes_all:
-        ups = node.upstream or []
-        resolved = []
-        for up in ups:
-            if up in name_map and name_map[up] != node.id:
-                resolved.append(name_map[up])          # 名字引用 → id
-            elif isinstance(up, int) and up in name_map.values() and up != node.id:
-                resolved.append(up)                    # 已是 id
-            elif str(up).isdigit() and int(up) in name_map.values() and int(up) != node.id:
-                resolved.append(int(up))
-            else:
-                problems.append(f"节点 {node.name}: 上游 {up} 不存在，已忽略")
-        if resolved != ups:
-            node.upstream = resolved
-    if problems:
-        db.commit()
-    # 依赖环检测（拓扑排序失败即存在环）
-    try:
-        task_runner.topo_sort(nodes_all)
-    except ValueError as e:
-        problems.append(str(e))
-    for node in db.query(WorkflowNode).filter(WorkflowNode.workflow_id == wf.id):
-        if node.node_type == "sql":
-            cfg = node.config or {}
-            ds_id = cfg.get("datasource_id")
-            from ..models import DataSource
-            ds = db.get(DataSource, ds_id) if ds_id else None
-            if not ds:
-                problems.append(f"节点 {node.name}: 数据源不存在")
-                continue
-            ok, msg = sqlguard.check_etl_sql(cfg.get("sql", ""), cfg.get("target_table", ""),
-                                             sqlguard.dialect_of(ds.type))
-            if not ok:
-                problems.append(f"节点 {node.name}: {msg}")
+    # upstream 归一化（名字→id）+ 环检测 + SQL 节点校验
+    problems = _normalize_upstream(db, wf)
+    problems += _validate_wf_nodes(db, wf)
     if req.enabled:
         sched_service.apply_schedule(db, wf)
     audit_svc.log(db, user, "sched.wf.create", "workflow", wf.id, {"name": req.name},
@@ -163,11 +194,16 @@ def update_wf(wf_id: int, req: WfUpdateReq, request: Request,
         wf.depends_on = req.depends_on
     if req.enabled is not None:
         wf.enabled = req.enabled
+    problems = []
+    if req.nodes is not None:
+        problems = _replace_wf_nodes(db, wf, req.nodes)  # 整体替换节点（含归一化/环检测/SQL 校验）
     db.commit()
     sched_service.apply_schedule(db, wf)
     audit_svc.log(db, user, "sched.wf.update", "workflow", wf.id,
                   req.dict(exclude_none=True), ip=client_ip(request))
-    return _ser_wf(wf, db)
+    out = _ser_wf(wf, db)
+    out["problems"] = problems
+    return out
 
 
 @router.delete("/workflows/{wf_id}")

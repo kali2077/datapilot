@@ -491,6 +491,58 @@ def test_etl_node_upstream_order(client, tokens):
     os.path.exists(marker) and os.remove(marker)
 
 
+def test_workflow_node_edit(client, tokens):
+    """节点编辑：PUT nodes 整体替换 + 名字上游归一化 + 编辑后的工作流可正常执行。"""
+    h = H(tokens["engineer"])
+    r = client.post("/api/sched/workflows", headers=h, json={
+        "name": "etl_edit_nodes", "schedule_cron": "",
+        "nodes": [{"name": "old", "node_type": "python",
+                   "config": {"script": "print('old')"}, "upstream": []}]})
+    wf_id = r.json()["id"]
+    # PUT 整体替换节点（名字上游引用 → 归一化为 id）
+    r = client.put(f"/api/sched/workflows/{wf_id}", headers=h, json={
+        "name": "etl_edit_nodes",
+        "enabled": True,
+        "nodes": [
+            {"name": "step2", "node_type": "python",
+             "config": {"script": "print('step2')"}, "upstream": ["step1"]},
+            {"name": "step1", "node_type": "python",
+             "config": {"script": "print('step1')"}, "upstream": []},
+        ]})
+    assert r.status_code == 200, r.text
+    assert r.json()["problems"] == [], r.json()["problems"]
+    r = client.get(f"/api/sched/workflows/{wf_id}", headers=h)
+    nodes = {n["name"]: n for n in r.json()["nodes"]}
+    assert set(nodes) == {"step1", "step2"}  # 旧节点被替换
+    step1 = nodes["step1"]
+    assert nodes["step2"]["upstream"] == [step1["id"]]  # 名字 → id 归一化
+    # 编辑后的工作流可执行（拓扑排序按依赖跑通）
+    r = client.post(f"/api/sched/workflows/{wf_id}/trigger", headers=h)
+    inst = wait_instance(client, tokens["engineer"], r.json()["instance_id"])
+    assert inst["status"] == "success", inst.get("error")
+    # PUT 不带 nodes → 元数据更新，节点不动
+    r = client.put(f"/api/sched/workflows/{wf_id}", headers=h,
+                   json={"description": "只改描述"})
+    assert r.status_code == 200 and r.json()["problems"] == []
+    r = client.get(f"/api/sched/workflows/{wf_id}", headers=h)
+    assert len(r.json()["nodes"]) == 2
+    # 未知上游 → problem 提示
+    r = client.put(f"/api/sched/workflows/{wf_id}", headers=h, json={
+        "nodes": [{"name": "x", "node_type": "python",
+                   "config": {"script": "print(1)"}, "upstream": ["ghost"]}]})
+    assert any("ghost" in p for p in r.json()["problems"])
+    # 循环依赖 → problem 提示
+    r = client.put(f"/api/sched/workflows/{wf_id}", headers=h, json={
+        "nodes": [
+            {"name": "c1", "node_type": "python", "config": {"script": "print(1)"},
+             "upstream": ["c2"]},
+            {"name": "c2", "node_type": "python", "config": {"script": "print(2)"},
+             "upstream": ["c1"]},
+        ]})
+    assert any("循环依赖" in p for p in r.json()["problems"])
+    client.delete(f"/api/sched/workflows/{wf_id}?force=true", headers=h)
+
+
 def test_cron_validation_and_permissions(client, tokens):
     h = H(tokens["engineer"])
     r = client.post("/api/sched/workflows", headers=h, json={

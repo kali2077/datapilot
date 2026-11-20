@@ -91,7 +91,9 @@ Base URL: `http://127.0.0.1:8100`（开发模式 Vite proxy 到 8100）
   - sql 节点 config: {datasource_id,sql,target_table}；python: {script}；datax: {sync_job_id}
   - 返回含 problems[]（SQL 校验问题）
 - GET `/api/sched/workflows/{id}` → +nodes[]
-- PUT `/api/sched/workflows/{id}` {name?,description?,schedule_cron?,depends_on?,enabled?}
+- PUT `/api/sched/workflows/{id}` {name?,description?,schedule_cron?,depends_on?,enabled?,nodes?}
+  - nodes 提供时**整体替换**工作流节点（结构同 create 的 nodes；含 upstream 名字→id 归一化、环检测、SQL 校验），
+    返回含 problems[]；不带 nodes 则仅更新元数据。历史实例按节点快照呈现，不受节点替换影响
 - POST `/api/sched/workflows/{id}/trigger` → {instance_id,status}
 - DELETE `/api/sched/workflows/{id}?force=true|false`（启用中/有实例需 force）
 - GET `/api/sched/instances?workflow_id=&status=&page=&size=` → {total,items[{id,workflow_name,trigger_type,logical_date,status,started_at,finished_at,error,triggered_by}]}

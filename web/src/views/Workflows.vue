@@ -77,8 +77,7 @@
           <el-switch v-model="form.enabled" />
         </el-form-item>
 
-        <template v-if="!dlg.isEdit">
-          <el-divider content-position="left">节点列表（按 DAG 编排）</el-divider>
+        <el-divider content-position="left">节点列表（按 DAG 编排，编辑可改 SQL/脚本）</el-divider>
           <div v-for="(n, i) in form.nodes" :key="n.key" class="node-box">
             <div class="node-head">
               <el-tag size="small" type="info">节点 {{ i + 1 }}</el-tag>
@@ -149,7 +148,6 @@
             </template>
           </div>
           <el-button icon="Plus" @click="addNode">添加节点</el-button>
-        </template>
       </el-form>
       <template #footer>
         <el-button @click="dlg.visible = false">取消</el-button>
@@ -286,7 +284,7 @@ function openCreate() {
   dlg.visible = true
 }
 
-function openEdit(row) {
+async function openEdit(row) {
   dlg.isEdit = true
   dlg.id = row.id
   Object.assign(form, {
@@ -298,6 +296,29 @@ function openEdit(row) {
     nodes: [],
   })
   dlg.visible = true
+  // 加载已保存的节点（SQL/Python 内容可编辑；upstream 存的是节点 id，下拉按名字绑定需映射回名字）
+  try {
+    const detail = await http.get(`/api/sched/workflows/${row.id}`)
+    const nameById = {}
+    detail.nodes.forEach((n) => { nameById[n.id] = n.name })
+    form.nodes = (detail.nodes || []).map((n) => ({
+      key: `e${nodeKeySeq++}`,
+      name: n.name,
+      node_type: n.node_type,
+      config: {
+        datasource_id: n.config?.datasource_id ?? null,
+        target_table: n.config?.target_table || '',
+        sql: n.config?.sql || '',
+        script: n.config?.script || '',
+        sync_job_id: n.config?.sync_job_id ?? null,
+      },
+      upstream: (n.upstream || []).map((id) => nameById[id] ?? id),
+      check: null,
+      plan: null,
+      checking: false,
+      explaining: false,
+    }))
+  } catch { /* 加载失败时保留空节点列表（仅改元数据） */ }
 }
 
 async function checkSql(n) {
@@ -339,6 +360,37 @@ async function explainSql(n) {
   }
 }
 
+function buildWfPayload() {
+  const named = form.nodes.filter((n) => n.name.trim())
+  return {
+    name: form.name.trim(),
+    description: form.description,
+    schedule_cron: form.schedule_cron.trim(),
+    depends_on: form.depends_on,
+    enabled: form.enabled,
+    nodes: named.map((n) => {
+      let config = {}
+      if (n.node_type === 'sql') {
+        config = {
+          datasource_id: n.config.datasource_id,
+          target_table: n.config.target_table || '',
+          sql: n.config.sql || '',
+        }
+      } else if (n.node_type === 'python') {
+        config = { script: n.config.script || '' }
+      } else {
+        config = { sync_job_id: n.config.sync_job_id }
+      }
+      return {
+        name: n.name.trim(),
+        node_type: n.node_type,
+        config,
+        upstream: [...(n.upstream || [])],
+      }
+    }),
+  }
+}
+
 async function save() {
   if (!form.name.trim()) {
     ElMessage.warning('请填写工作流名称')
@@ -350,33 +402,7 @@ async function save() {
       ElMessage.warning('请至少配置一个节点（含名称）')
       return
     }
-    const payload = {
-      name: form.name.trim(),
-      description: form.description,
-      schedule_cron: form.schedule_cron.trim(),
-      depends_on: form.depends_on,
-      enabled: form.enabled,
-      nodes: named.map((n) => {
-        let config = {}
-        if (n.node_type === 'sql') {
-          config = {
-            datasource_id: n.config.datasource_id,
-            target_table: n.config.target_table || '',
-            sql: n.config.sql || '',
-          }
-        } else if (n.node_type === 'python') {
-          config = { script: n.config.script || '' }
-        } else {
-          config = { sync_job_id: n.config.sync_job_id }
-        }
-        return {
-          name: n.name.trim(),
-          node_type: n.node_type,
-          config,
-          upstream: [...(n.upstream || [])],
-        }
-      }),
-    }
+    const payload = buildWfPayload()
     saving.value = true
     try {
       const res = await http.post('/api/sched/workflows', payload)
@@ -394,17 +420,18 @@ async function save() {
       saving.value = false
     }
   } else {
+    // 编辑：整体保存元数据 + 节点（含 SQL/Python 内容），后端整体替换并校验
+    const payload = buildWfPayload()
     saving.value = true
     try {
-      await http.put(`/api/sched/workflows/${dlg.id}`, {
-        name: form.name.trim(),
-        description: form.description,
-        schedule_cron: form.schedule_cron.trim(),
-        depends_on: form.depends_on,
-        enabled: form.enabled,
-      })
-      ElMessage.success('已保存')
+      const res = await http.put(`/api/sched/workflows/${dlg.id}`, payload)
       dlg.visible = false
+      if (res.problems && res.problems.length) {
+        problemsDlg.list = res.problems
+        problemsDlg.visible = true
+      } else {
+        ElMessage.success('工作流已保存')
+      }
       load()
     } catch (e) {
       ElMessage.error(errMsg(e))
