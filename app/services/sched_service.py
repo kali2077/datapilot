@@ -22,6 +22,7 @@ from . import task_runner
 _scheduler: Optional[BackgroundScheduler] = None
 _lock = threading.Lock()
 _poller_started = False
+_airflow_inst_lock = threading.Lock()  # ensure_airflow_instance 并发幂等保护
 
 
 # ---------------------------------------------------------------- cron 校验
@@ -61,19 +62,15 @@ def _get_scheduler() -> BackgroundScheduler:
 
 
 def rebuild_jobs(db: Session):
-    """启动时从配置库重建全部本地调度（幂等），并启动等待轮询器与元数据定时采集。"""
+    """启动时从配置库重建调度基建（幂等）：轮询器 / 监控规则 / 元数据定时采集
+    在任意引擎模式下都由平台自身执行；仅本地工作流 cron 属于 local 引擎。"""
     _start_poller()
     # 监控规则调度（数据监控告警模块）：任何调度引擎模式下都由平台自身执行
     from . import monitor_service
     monitor_service.register_all(db)
-    if config.SCHEDULER_ENGINE != "local":
-        return
     sched = _get_scheduler()
-    for wf in db.query(Workflow).filter(Workflow.enabled == True).all():  # noqa: E712
-        ok, _ = validate_cron(wf.schedule_cron)
-        if ok and wf.schedule_cron.strip():
-            _register_local(sched, wf.id, wf.schedule_cron)
-    # 元数据定时采集（PRD FR-META：新数据源定时可见）；META_COLLECT_HOURS=0 关闭
+    # 元数据定时采集（PRD FR-META）+ 资产变更巡检：与调度引擎无关，任意模式都跑；
+    # META_COLLECT_HOURS=0 关闭
     hours = int(os.getenv("META_COLLECT_HOURS", "24"))
     if hours > 0:
         job_id = "meta_collect_all"
@@ -81,6 +78,12 @@ def rebuild_jobs(db: Session):
             sched.remove_job(job_id)
         sched.add_job(_collect_all_meta, trigger="interval", hours=hours,
                       id=job_id, name=job_id, next_run_time=datetime.datetime.now())
+    if config.SCHEDULER_ENGINE != "local":
+        return
+    for wf in db.query(Workflow).filter(Workflow.enabled == True).all():  # noqa: E712
+        ok, _ = validate_cron(wf.schedule_cron)
+        if ok and wf.schedule_cron.strip():
+            _register_local(sched, wf.id, wf.schedule_cron)
 
 
 def _collect_all_meta():
@@ -131,7 +134,11 @@ def _start_poller():
             time.sleep(30)
             db = SessionLocal()
             try:
-                waiting = db.query(TaskInstance).filter(TaskInstance.status == "waiting").all()
+                # airflow 驱动的实例（external_run_id 非空）由 Airflow 逐节点回调推进，
+                # 不交给本地 poller 整实例执行
+                waiting = (db.query(TaskInstance)
+                             .filter(TaskInstance.status == "waiting",
+                                     TaskInstance.external_run_id == "").all())
                 for inst in waiting:
                     wf = db.get(Workflow, inst.workflow_id)
                     if not wf or not wf.enabled:
@@ -153,13 +160,24 @@ def _start_poller():
 
 # ---------------------------------------------------------------- Airflow 适配器
 
-def _airflow_write_config(wf: Workflow, nodes):
+def _airflow_write_config(db: Session, wf: Workflow, nodes):
     if not config.AIRFLOW_DAGS_DIR:
         raise ValueError("AIRFLOW_DAGS_DIR 未配置")
     out_dir = os.path.join(config.AIRFLOW_DAGS_DIR, "workflows")
     os.makedirs(out_dir, exist_ok=True)
+    # 重试策略：同步任务取其 SyncJob.config（retries/retry_delay_minutes），其余默认不重试
+    retries, retry_delay = 0, 1
+    if wf.job_type == "sync" and wf.sync_job_id:
+        from ..models import SyncJob
+        sj = db.get(SyncJob, wf.sync_job_id)
+        if sj:
+            cfg = sj.config or {}
+            retries = max(0, min(int(cfg.get("retries", 0) or 0), 5))
+            retry_delay = max(1, int(cfg.get("retry_delay_minutes", 1) or 1))
     payload = {
         "workflow_id": wf.id, "name": wf.name, "cron": wf.schedule_cron,
+        "enabled": bool(wf.enabled),  # factory 以 is_paused_upon_creation 落定，防 PATCH 竞态
+        "retries": retries, "retry_delay_minutes": retry_delay,
         "depends_on": wf.depends_on or [],
         "nodes": [{"id": n.id, "name": n.name, "type": n.node_type,
                    "upstream": n.upstream or [], "config": n.config} for n in nodes],
@@ -170,19 +188,43 @@ def _airflow_write_config(wf: Workflow, nodes):
     return path
 
 
-def _airflow_api(method: str, path: str, payload: dict = None):
-    import httpx
-    headers = {"Content-Type": "application/json"}
-    if config.AIRFLOW_TOKEN:
-        headers["Authorization"] = f"Bearer {config.AIRFLOW_TOKEN}"
-    resp = httpx.request(method, f"{config.AIRFLOW_URL.rstrip('/')}{path}",
-                         json=payload, headers=headers, timeout=15)
-    resp.raise_for_status()
-    return resp
-
-
 def _airflow_dag_id(wf: Workflow) -> str:
     return f"datapilot_wf_{wf.id}"
+
+
+def remove_airflow_config(wf_id: int):
+    """工作流删除后同步移除 factory 配置文件（airflow 模式），避免孤儿 DAG。"""
+    if config.SCHEDULER_ENGINE != "airflow" or not config.AIRFLOW_DAGS_DIR:
+        return
+    try:
+        os.remove(os.path.join(config.AIRFLOW_DAGS_DIR, "workflows", f"wf_{wf_id}.json"))
+    except OSError:
+        pass
+
+
+def _wf_node_ids(db: Session, wf_id: int) -> list:
+    from ..models import WorkflowNode
+    return [n.id for n in db.query(WorkflowNode)
+            .filter(WorkflowNode.workflow_id == wf_id).all()]
+
+
+def ensure_airflow_instance(db: Session, wf: Workflow, dag_run_id: str,
+                            logical_date=None) -> TaskInstance:
+    """Airflow 节点级回调的实例映射：同一 (workflow, dag_run_id) 幂等复用平台实例。"""
+    with _airflow_inst_lock:
+        inst = (db.query(TaskInstance)
+                  .filter(TaskInstance.workflow_id == wf.id,
+                          TaskInstance.external_run_id == dag_run_id).first())
+        if inst is None:
+            inst = TaskInstance(workflow_id=wf.id, workflow_name=wf.name,
+                                trigger_type="scheduled",
+                                logical_date=logical_date or datetime.datetime.now(),
+                                status="waiting", triggered_by="airflow",
+                                external_run_id=dag_run_id,
+                                node_ids=_wf_node_ids(db, wf.id))
+            db.add(inst)
+            db.commit()
+        return inst
 
 
 # ---------------------------------------------------------------- 对外接口
@@ -192,10 +234,10 @@ def apply_schedule(db: Session, wf: Workflow):
     from ..models import WorkflowNode
     if config.SCHEDULER_ENGINE == "airflow":
         nodes = db.query(WorkflowNode).filter(WorkflowNode.workflow_id == wf.id).all()
-        _airflow_write_config(wf, nodes)
+        _airflow_write_config(db, wf, nodes)
         try:
-            _airflow_api("POST", f"/api/v1/dags/{_airflow_dag_id(wf)}",
-                         {"is_paused": not bool(wf.enabled)})
+            from . import airflow_client
+            airflow_client.patch_dag(_airflow_dag_id(wf), not bool(wf.enabled))
         except Exception:
             pass  # airflow 不可达时不阻塞平台操作
         return
@@ -215,7 +257,8 @@ def trigger_workflow(db: Session, wf: Workflow, trigger_type: str = "manual",
                      wait_on_deps: bool = False, triggered_by: str = "") -> TaskInstance:
     inst = TaskInstance(workflow_id=wf.id, workflow_name=wf.name,
                         trigger_type=trigger_type, logical_date=datetime.datetime.now(),
-                        status="waiting", triggered_by=triggered_by or trigger_type)
+                        status="waiting", triggered_by=triggered_by or trigger_type,
+                        node_ids=_wf_node_ids(db, wf.id))
     db.add(inst)
     db.commit()
     if wait_on_deps:

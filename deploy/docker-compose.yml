@@ -61,22 +61,38 @@ services:
       - airflow_db_data:/var/lib/postgresql/data
 
   airflow:
-    image: apache/airflow:2.9-python3.10
+    # Airflow 3.x：/api/v1 已移除（稳定 API 在 /api/v2），认证为 SimpleAuthManager JWT
+    image: apache/airflow:${AIRFLOW_IMAGE_TAG:-3.4.0}
     container_name: datapilot-airflow
     depends_on: [airflow-db]
     environment:
       AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://airflow:airflow@airflow-db/airflow
       AIRFLOW__CORE__EXECUTOR: LocalExecutor
-      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_SECRET:-datapilot_airflow_secret}
-      AIRFLOW__API__AUTH_BACKENDS: airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session
-      _AIRFLOW_DB_MIGRATE: "true"
-      _AIRFLOW_WWW_USER_CREATE: "true"
-      _AIRFLOW_WWW_USER_USERNAME: admin
-      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_PASSWORD:-datapilot_airflow}
+      AIRFLOW__CORE__LOAD_EXAMPLES: "false"
+      AIRFLOW__API__SECRET_KEY: ${AIRFLOW_SECRET:-datapilot_airflow_secret}
+      # SimpleAuthManager 静态用户（该版本若无此配置项则由下方 CLI 创建兜底）
+      AIRFLOW__AUTH_MANAGER__SIMPLE_AUTH_MANAGER__USERS: '[{"username": "admin", "password": "${AIRFLOW_PASSWORD:-datapilot_airflow}", "role": "Admin"}]'
+      AIRFLOW_ADMIN_PASSWORD: ${AIRFLOW_PASSWORD:-datapilot_airflow}
+      # factory DAG 节点级回调平台所需
+      DATAPILOT_API: http://app:8000
+      DATAPILOT_TOKEN: ${DATAPILOT_TOKEN:-}
     entrypoint: /bin/bash
     command:
       - -c
-      - airflow standalone & sleep 20 && cp -r /opt/factory/. /opt/airflow/dags/ && tail -f /dev/null
+      - |
+        airflow db migrate
+        airflow users create -u admin -p "$$AIRFLOW_ADMIN_PASSWORD" -f Data -l Pilot -r Admin 2>/dev/null || true
+        airflow standalone &
+        sleep 20
+        cp -r /opt/factory/. /opt/airflow/dags/
+        for i in $$(seq 1 30); do
+          TOK=$$(curl -sf -X POST http://localhost:8080/auth/token -H 'Content-Type: application/json' \
+                -d "{\"username\":\"admin\",\"password\":\"$$AIRFLOW_ADMIN_PASSWORD\"}" \
+            | python -c 'import sys,json; d=json.load(sys.stdin); print(d.get("access_token") or d.get("token") or "")' 2>/dev/null)
+          if [ -n "$$TOK" ]; then echo -n "$$TOK" > /opt/airflow/dags/airflow_token.txt; break; fi
+          sleep 5
+        done
+        wait
     volumes:
       - ./airflow:/opt/factory:ro
       - airflow_dags:/opt/airflow/dags
@@ -104,7 +120,11 @@ services:
       DATABASE_URL: mysql+pymysql://datapilot:${MYSQL_PASSWORD:-datapilot_pass}@mysql:3306/datapilot
       SCHEDULER_ENGINE: ${SCHEDULER_ENGINE:-local}   # local | airflow
       AIRFLOW_URL: http://airflow:8080
-      AIRFLOW_TOKEN: ${AIRFLOW_TOKEN:-}
+      AIRFLOW_DAGS_DIR: /opt/airflow/dags            # 与 airflow 容器共享 dags 卷（写 workflows/*.json）
+      AIRFLOW_TOKEN: ${AIRFLOW_TOKEN:-}              # 直填长期 token（优先级最高）
+      AIRFLOW_TOKEN_FILE: /opt/airflow/dags/airflow_token.txt  # airflow 容器自动签发
+      AIRFLOW_USER: admin                            # 兜底：user/password 自动调 /auth/token
+      AIRFLOW_PASSWORD: ${AIRFLOW_PASSWORD:-datapilot_airflow}
       AI_BASE_URL: ${AI_BASE_URL:-}
       AI_API_KEY: ${AI_API_KEY:-}
       AI_MODEL: ${AI_MODEL:-deepseek-chat}
@@ -114,6 +134,7 @@ services:
       - "8000:8000"
     volumes:
       - ./data:/app/deploy/data
+      - airflow_dags:/opt/airflow/dags
 
   nginx:
     image: nginx:1.25

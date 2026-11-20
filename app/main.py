@@ -18,12 +18,13 @@ def create_app() -> FastAPI:
         allow_methods=["*"], allow_headers=["*"])
 
     from .routers import (auth, datasources, meta, integ, sched, chat, asset,
-                          apigw, audit, query, monitor, hadoop, tools)
+                          apigw, audit, query, monitor, hadoop, tools, airflow)
     app.include_router(auth.router)
     app.include_router(datasources.router)
     app.include_router(meta.router)
     app.include_router(integ.router)
     app.include_router(sched.router)
+    app.include_router(airflow.router)
     app.include_router(chat.router)
     app.include_router(asset.router)
     app.include_router(apigw.router)
@@ -47,14 +48,14 @@ def create_app() -> FastAPI:
         run_migrations()
         from . import seed
         seed.run()
-        # 重建本地调度任务
-        if config.SCHEDULER_ENGINE == "local":
-            from .services import sched_service
-            db = SessionLocal()
-            try:
-                sched_service.rebuild_jobs(db)
-            finally:
-                db.close()
+        # 调度基建：等待轮询器 + 监控规则在任意引擎模式下都由平台自身执行
+        # （rebuild_jobs 内部自行判断：仅 local 注册本地 cron 与元数据采集）
+        from .services import sched_service
+        db = SessionLocal()
+        try:
+            sched_service.rebuild_jobs(db)
+        finally:
+            db.close()
         vec_ok = False
         try:
             from .services.embedder import get_embedder

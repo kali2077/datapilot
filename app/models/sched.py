@@ -50,6 +50,10 @@ class TaskInstance(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     error: Mapped[str] = mapped_column(Text, default="")
     triggered_by: Mapped[str] = mapped_column(String(64), default="scheduler")
+    # Airflow 模式：对应的 Airflow dag_run_id（节点级回调按它幂等映射平台实例）
+    external_run_id: Mapped[str] = mapped_column(String(128), default="", index=True)
+    # 创建时的节点 id 快照：节点级回调/失败收敛按它判断完成度（工作流节点后续变更不影响在途实例）
+    node_ids: Mapped[list] = mapped_column(JSON, default=list)
 
 
 class NodeRun(Base):
@@ -65,6 +69,8 @@ class NodeRun(Base):
     finished_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     duration_ms: Mapped[int] = mapped_column(Integer, default=0)
     attempt: Mapped[int] = mapped_column(Integer, default=1)
+    # 同步任务写入行数（run_sync 产出；断流检测/趋势用，非 datax 节点为 -1）
+    rows_written: Mapped[int] = mapped_column(Integer, default=-1)
 
 
 class AlertChannel(Base):

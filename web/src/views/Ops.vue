@@ -53,65 +53,111 @@
           </div>
         </el-tab-pane>
 
-        <!-- ============ 告警通道 ============ -->
-        <el-tab-pane label="告警通道" name="channels">
+        <!-- ============ 运行矩阵（Grid：实例 × 节点） ============ -->
+        <el-tab-pane label="运行矩阵" name="matrix">
           <div class="toolbar">
-            <span class="muted">任务失败/超时时通知的渠道（管理员维护）</span>
+            <el-select v-model="mx.wfId" placeholder="选择工作流" filterable style="width: 220px" @change="loadMatrix">
+              <el-option v-for="w in workflows" :key="w.id" :label="w.name" :value="w.id" />
+            </el-select>
+            <el-select v-model="mx.size" style="width: 110px" @change="loadMatrix">
+              <el-option :value="10" label="最近 10" />
+              <el-option :value="15" label="最近 15" />
+              <el-option :value="30" label="最近 30" />
+              <el-option :value="50" label="最近 50" />
+            </el-select>
+            <el-checkbox v-model="mx.auto" @change="onMxAuto">自动刷新(30s)</el-checkbox>
             <div class="spacer" />
-            <el-button v-if="auth.isAdmin" type="primary" icon="Plus" @click="openChannel()">新建通道</el-button>
+            <el-button icon="Refresh" circle @click="loadMatrix" />
           </div>
-          <el-table v-loading="chLoading" :data="channels" stripe>
-            <el-table-column prop="name" label="名称" min-width="160" />
-            <el-table-column label="类型" width="100">
-              <template #default="{ row }">
-                <el-tag size="small" :type="row.type === 'email' ? 'primary' : 'warning'">{{ row.type }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column label="配置" min-width="300" show-overflow-tooltip>
-              <template #default="{ row }">
-                <span class="mono muted">{{ channelSummary(row) }}</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="启用" width="80">
-              <template #default="{ row }">
-                <el-tag size="small" :type="row.enabled ? 'success' : 'info'">{{ row.enabled ? '是' : '否' }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column v-if="auth.isAdmin" label="操作" width="140" fixed="right">
-              <template #default="{ row }">
-                <el-button link type="primary" @click="openChannel(row)">编辑</el-button>
-                <el-button link type="danger" @click="removeChannel(row)">删除</el-button>
-              </template>
-            </el-table-column>
-            <template #empty><el-empty description="暂无告警通道" /></template>
-          </el-table>
+
+          <template v-if="mx.data">
+            <div class="muted" style="margin-bottom: 8px">
+              {{ mx.data.workflow.name }} · Cron {{ mx.data.workflow.schedule_cron || '手动' }} ·
+              {{ mx.data.rows.length }} 个实例（新→旧），点击色块查看实例日志
+            </div>
+            <el-table v-loading="mx.loading" :data="mx.data.rows" size="small" border>
+              <el-table-column label="实例" width="215" fixed="left">
+                <template #default="{ row }">
+                  <span class="mx-inst" @click="openInstanceById(row.instance_id)">
+                    <span class="dp-dot" :class="dotClass(row.status)" />
+                    {{ (row.logical_date || '').slice(5, 16) }}
+                    <el-tag size="small" :type="triggerTag(row.trigger_type)" effect="plain">{{ triggerLabel(row.trigger_type) }}</el-tag>
+                  </span>
+                </template>
+              </el-table-column>
+              <el-table-column v-for="n in mx.data.nodes" :key="n.id" min-width="100" align="center">
+                <template #header>
+                  <span>{{ n.name }} <el-tag size="small" effect="plain">{{ n.node_type }}</el-tag></span>
+                </template>
+                <template #default="{ row }">
+                  <span
+                    v-if="row.cells[n.id]" class="mx-cell" :class="`mx-${row.cells[n.id].status}`"
+                    :title="`${n.name} · ${statusLabel(row.cells[n.id].status)}${row.cells[n.id].duration_ms ? ' · ' + fmtDuration(row.cells[n.id].duration_ms) : ''}`"
+                    @click="openInstanceById(row.instance_id)"
+                  />
+                  <span v-else class="mx-cell mx-none" title="未运行" />
+                </template>
+              </el-table-column>
+              <template #empty><el-empty description="暂无实例" /></template>
+            </el-table>
+            <div class="muted" style="margin-top: 8px">
+              图例：<span class="mx-cell mx-success" />成功 <span class="mx-cell mx-failed" />失败
+              <span class="mx-cell mx-running" />运行中 <span class="mx-cell mx-waiting" />等待
+              <span class="mx-cell mx-skipped" />跳过 <span class="mx-cell mx-none" />未运行
+            </div>
+          </template>
+          <el-empty v-else-if="!mx.wfId" description="选择工作流查看运行矩阵" />
         </el-tab-pane>
 
-        <!-- ============ 告警记录 ============ -->
-        <el-tab-pane label="告警记录" name="records">
-          <div class="toolbar">
-            <span class="muted">共 {{ recTotal }} 条</span>
-            <div class="spacer" />
-            <el-button icon="Refresh" circle @click="loadRecords" />
-          </div>
-          <el-table v-loading="recLoading" :data="records" stripe>
-            <el-table-column prop="id" label="#" width="64" />
-            <el-table-column prop="channel" label="通道" width="150" />
-            <el-table-column prop="title" label="告警内容" min-width="320" show-overflow-tooltip />
-            <el-table-column label="实例" width="90">
-              <template #default="{ row }">
-                <el-link v-if="row.instance_id" type="primary" @click.stop="openInstanceById(row.instance_id)">#{{ row.instance_id }}</el-link>
-                <span v-else>-</span>
-              </template>
-            </el-table-column>
-            <el-table-column label="状态" width="90">
-              <template #default="{ row }">
-                <el-tag size="small" :type="row.status === 'sent' ? 'success' : 'danger'">{{ row.status || '-' }}</el-tag>
-              </template>
-            </el-table-column>
-            <el-table-column prop="ts" label="时间" width="170" />
-            <template #empty><el-empty description="暂无告警记录" /></template>
-          </el-table>
+        <!-- ============ 调度引擎（Airflow 侧视角） ============ -->
+        <el-tab-pane label="调度引擎" name="engine">
+          <template v-if="eng.status">
+            <el-alert
+              v-if="eng.status.engine !== 'airflow'" type="info" :closable="false" show-icon
+              title="当前为内置调度引擎（local）" description="引擎面板面向 Airflow 模式；local 模式下若下方显示不可达属正常。"
+              style="margin-bottom: 12px"
+            />
+            <div class="eng-head">
+              <span class="dp-dot" :class="eng.status.reachable ? 'ok' : 'danger'" />
+              <b>{{ eng.status.engine === 'airflow' ? 'Airflow' : 'Local (APScheduler)' }}</b>
+              <el-tag v-if="eng.status.version" size="small" effect="plain">v{{ eng.status.version }}</el-tag>
+              <span class="muted">{{ eng.status.reachable ? '引擎可达' : `不可达：${eng.status.error}` }}</span>
+              <div class="spacer" />
+              <el-button icon="Refresh" circle @click="loadEngine" />
+            </div>
+
+            <el-table v-loading="eng.loading" :data="eng.dags" stripe>
+              <el-table-column prop="dag_id" label="DAG" min-width="190" class-name="mono" />
+              <el-table-column label="平台工作流" width="110">
+                <template #default="{ row }">
+                  <el-link v-if="row.workflow_id" type="primary" class="mono"
+                           @click="$router.push(`/ops?workflow_id=${row.workflow_id}`)">#{{ row.workflow_id }}</el-link>
+                  <span v-else class="muted">-</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="解析" width="90">
+                <template #default="{ row }">
+                  <el-tag v-if="row.has_import_errors" type="danger" size="small">异常</el-tag>
+                  <el-tag v-else type="success" size="small">正常</el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column label="暂停" width="80">
+                <template #default="{ row }">
+                  <el-switch :model-value="row.is_paused" :disabled="!row.is_active" @change="(v) => toggleDagPaused(row, v)" />
+                </template>
+              </el-table-column>
+              <el-table-column label="最近解析" width="165">
+                <template #default="{ row }">{{ fmtAfTime(row.last_parsed_time) }}</template>
+              </el-table-column>
+              <el-table-column label="操作" width="160" fixed="right">
+                <template #default="{ row }">
+                  <el-button link type="primary" @click="openEngRuns(row)">运行历史</el-button>
+                  <el-button link type="success" @click="triggerDag(row)">触发</el-button>
+                </template>
+              </el-table-column>
+              <template #empty><el-empty description="暂无 DataPilot DAG（Airflow 模式下创建工作流后生成）" /></template>
+            </el-table>
+          </template>
         </el-tab-pane>
       </el-tabs>
     </div>
@@ -182,49 +228,62 @@
       <div v-else v-loading="true" style="height: 300px" />
     </el-drawer>
 
-    <!-- 告警通道对话框 -->
-    <el-dialog v-model="chDlg.visible" :title="chDlg.isEdit ? '编辑告警通道' : '新建告警通道'" width="520px" destroy-on-close>
-      <el-form :model="chDlg.form" label-width="90px">
-        <el-form-item label="名称" required><el-input v-model="chDlg.form.name" /></el-form-item>
-        <el-form-item label="类型" required>
-          <el-radio-group v-model="chDlg.form.type">
-            <el-radio-button value="email">Email</el-radio-button>
-            <el-radio-button value="webhook">Webhook</el-radio-button>
-          </el-radio-group>
-        </el-form-item>
-        <template v-if="chDlg.form.type === 'email'">
-          <el-form-item label="收件人" required>
-            <el-input v-model="chDlg.form.config.to" placeholder="a@x.com, b@x.com" />
-          </el-form-item>
-          <el-form-item label="SMTP 主机" required><el-input v-model="chDlg.form.config.smtp_host" /></el-form-item>
-          <el-form-item label="SMTP 端口"><el-input-number v-model="chDlg.form.config.smtp_port" :min="1" :max="65535" /></el-form-item>
-          <el-form-item label="用户名"><el-input v-model="chDlg.form.config.username" /></el-form-item>
-          <el-form-item label="密码/授权码"><el-input v-model="chDlg.form.config.password" type="password" show-password /></el-form-item>
-        </template>
-        <template v-else>
-          <el-form-item label="URL" required><el-input v-model="chDlg.form.config.url" placeholder="https://..." /></el-form-item>
-          <el-form-item label="Secret"><el-input v-model="chDlg.form.config.secret" placeholder="可选，用于签名" /></el-form-item>
-        </template>
-        <el-form-item label="启用"><el-switch v-model="chDlg.form.enabled" /></el-form-item>
-      </el-form>
-      <template #footer>
-        <el-button @click="chDlg.visible = false">取消</el-button>
-        <el-button type="primary" :loading="chDlg.saving" @click="saveChannel">保存</el-button>
-      </template>
-    </el-dialog>
+    <!-- Airflow 运行历史抽屉 -->
+    <el-drawer v-model="engRuns.visible" :title="`Airflow 运行历史：${engRuns.dagId}`" size="820px">
+      <el-table v-loading="engRuns.loading" :data="engRuns.rows" size="small" border @expand-change="loadEngTasks">
+        <el-table-column type="expand">
+          <template #default="{ row }">
+            <div style="padding: 8px 12px">
+              <template v-if="engRuns.tasks[row.dag_run_id]">
+                <el-table :data="engRuns.tasks[row.dag_run_id]" size="small" border>
+                  <el-table-column prop="task_id" label="任务（=平台节点）" min-width="160" class-name="mono" />
+                  <el-table-column label="状态" width="95">
+                    <template #default="{ row: t }">
+                      <span class="status-cell"><span class="dp-dot" :class="dotClass(afToStatus(t.state))" />{{ afStateLabel(t.state) }}</span>
+                    </template>
+                  </el-table-column>
+                  <el-table-column prop="try_number" label="尝试" width="60" align="center" />
+                  <el-table-column label="开始" width="160">
+                    <template #default="{ row: t }">{{ fmtAfTime(t.start_date) || '-' }}</template>
+                  </el-table-column>
+                  <el-table-column label="结束" width="160">
+                    <template #default="{ row: t }">{{ fmtAfTime(t.end_date) || '-' }}</template>
+                  </el-table-column>
+                </el-table>
+              </template>
+              <div v-else class="muted" style="padding: 6px 0">加载任务实例中…</div>
+            </div>
+          </template>
+        </el-table-column>
+        <el-table-column prop="dag_run_id" label="Run ID" min-width="230" class-name="mono" show-overflow-tooltip />
+        <el-table-column label="状态" width="95">
+          <template #default="{ row }">
+            <span class="status-cell"><span class="dp-dot" :class="dotClass(afToStatus(row.state))" />{{ afStateLabel(row.state) }}</span>
+          </template>
+        </el-table-column>
+        <el-table-column prop="run_type" label="类型" width="90">
+          <template #default="{ row }">{{ row.run_type || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="逻辑日期" width="160">
+          <template #default="{ row }">{{ fmtAfTime(row.logical_date) || '-' }}</template>
+        </el-table-column>
+        <el-table-column label="开始" width="160">
+          <template #default="{ row }">{{ fmtAfTime(row.start_date) || '-' }}</template>
+        </el-table-column>
+        <template #empty><el-empty description="暂无运行记录" /></template>
+      </el-table>
+    </el-drawer>
   </div>
 </template>
 
 <script setup>
-import { onMounted, reactive, ref } from 'vue'
+import { onMounted, onUnmounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
+import { ElMessage } from 'element-plus'
 import http, { errMsg, fmtDuration, timeDiff } from '../api'
 import { openAi } from '../ai'
-import { useAuthStore } from '../store'
 
 const route = useRoute()
-const auth = useAuthStore()
 const tab = ref('instances')
 
 const workflows = ref([])
@@ -245,17 +304,6 @@ const instanceStatuses = [
 
 const instDlg = reactive({ visible: false, info: null, onlyFailed: false, rerunning: false })
 
-const channels = ref([])
-const chLoading = ref(false)
-const chDlg = reactive({
-  visible: false, isEdit: false, id: null, saving: false,
-  form: { name: '', type: 'email', enabled: true, config: {} },
-})
-
-const records = ref([])
-const recTotal = ref(0)
-const recLoading = ref(false)
-
 function statusLabel(s) {
   return { success: '成功', failed: '失败', running: '运行中', waiting: '等待', skipped: '跳过' }[s] || (s || '-')
 }
@@ -264,11 +312,6 @@ function triggerTag(t) {
 }
 function triggerLabel(t) {
   return { manual: '手动', scheduled: '调度', rerun: '重跑' }[t] || (t || '-')
-}
-function channelSummary(row) {
-  const c = row.config || {}
-  if (row.type === 'email') return `to: ${c.to || '-'} | smtp: ${c.smtp_host || '-'}:${c.smtp_port || '-'}`
-  return `url: ${c.url || '-'}`
 }
 
 async function loadWorkflows() {
@@ -339,104 +382,133 @@ async function rerunNode(run) {
   }
 }
 
-/* ---------- 告警通道 ---------- */
-async function loadChannels() {
-  chLoading.value = true
-  try {
-    channels.value = await http.get('/api/sched/alert-channels')
-  } catch { /* ignore */ } finally {
-    chLoading.value = false
-  }
+/* ---------- 运行矩阵（Grid） ---------- */
+const mx = reactive({ wfId: null, size: 15, auto: false, data: null, loading: false })
+let mxTimer = null
+
+function dotClass(s) {
+  return { success: 'ok', failed: 'danger', running: 'run', skipped: 'warn', waiting: 'idle' }[s] || 'idle'
 }
 
-function openChannel(row) {
-  chDlg.isEdit = !!row
-  chDlg.id = row?.id || null
-  chDlg.form = {
-    name: row?.name || '',
-    type: row?.type || 'email',
-    enabled: row ? !!row.enabled : true,
-    config: row ? { ...(row.config || {}) } : { to: '', smtp_host: '', smtp_port: 465, username: '', password: '', url: '', secret: '' },
-  }
-  chDlg.visible = true
-}
-
-async function saveChannel() {
-  const f = chDlg.form
-  if (!f.name.trim()) {
-    ElMessage.warning('请填写通道名称')
-    return
-  }
-  const config = {}
-  if (f.type === 'email') {
-    if (!f.config.to?.trim() || !f.config.smtp_host?.trim()) {
-      ElMessage.warning('请填写收件人与 SMTP 主机')
-      return
-    }
-    Object.assign(config, {
-      to: f.config.to, smtp_host: f.config.smtp_host,
-      smtp_port: f.config.smtp_port || 465, username: f.config.username || '', password: f.config.password || '',
-    })
-  } else {
-    if (!f.config.url?.trim()) {
-      ElMessage.warning('请填写 Webhook URL')
-      return
-    }
-    Object.assign(config, { url: f.config.url, secret: f.config.secret || '' })
-  }
-  chDlg.saving = true
+async function loadMatrix() {
+  if (!mx.wfId) return
+  mx.loading = true
   try {
-    const payload = { name: f.name.trim(), type: f.type, config, enabled: f.enabled }
-    if (chDlg.isEdit) await http.put(`/api/sched/alert-channels/${chDlg.id}`, payload)
-    else await http.post('/api/sched/alert-channels', payload)
-    ElMessage.success('已保存')
-    chDlg.visible = false
-    loadChannels()
+    mx.data = await http.get('/api/sched/matrix', { params: { workflow_id: mx.wfId, size: mx.size } })
   } catch (e) {
     ElMessage.error(errMsg(e))
   } finally {
-    chDlg.saving = false
+    mx.loading = false
   }
 }
 
-async function removeChannel(row) {
+function onMxAuto(v) {
+  clearInterval(mxTimer)
+  if (v) mxTimer = setInterval(loadMatrix, 30000)
+}
+
+/* ---------- 调度引擎（Airflow 侧） ---------- */
+const eng = reactive({ status: null, dags: [], loading: false })
+const engRuns = reactive({ visible: false, dagId: '', rows: [], loading: false, tasks: {} })
+
+async function loadEngine() {
+  eng.loading = true
   try {
-    await ElMessageBox.confirm(`删除告警通道「${row.name}」？`, '确认', { type: 'warning' })
-  } catch { return }
+    eng.status = await http.get('/api/airflow/status')
+    eng.dags = []
+    if (eng.status.reachable) {
+      const res = await http.get('/api/airflow/dags')
+      eng.dags = res.dags || []
+    }
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  } finally {
+    eng.loading = false
+  }
+}
+
+async function toggleDagPaused(row, v) {
   try {
-    await http.delete(`/api/sched/alert-channels/${row.id}`)
-    ElMessage.success('已删除')
-    loadChannels()
+    await http.patch(`/api/airflow/dags/${row.dag_id}`, { is_paused: v })
+    row.is_paused = v
+    ElMessage.success(v ? 'DAG 已暂停' : 'DAG 已恢复')
   } catch (e) {
     ElMessage.error(errMsg(e))
   }
 }
 
-/* ---------- 告警记录 ---------- */
-async function loadRecords() {
-  recLoading.value = true
+async function triggerDag(row) {
   try {
-    const res = await http.get('/api/sched/alert-records', { params: { page: 1, size: 50 } })
-    records.value = res.items
-    recTotal.value = res.total
-  } catch { /* ignore */ } finally {
-    recLoading.value = false
+    await http.post(`/api/airflow/dags/${row.dag_id}/trigger`)
+    ElMessage.success('已触发，稍后刷新运行历史查看')
+    if (engRuns.visible && engRuns.dagId === row.dag_id) loadEngRuns()
+  } catch (e) {
+    ElMessage.error(errMsg(e))
   }
 }
 
+async function openEngRuns(row) {
+  engRuns.dagId = row.dag_id
+  engRuns.visible = true
+  await loadEngRuns()
+}
+
+async function loadEngRuns() {
+  engRuns.loading = true
+  try {
+    const res = await http.get(`/api/airflow/dags/${engRuns.dagId}/runs`, { params: { limit: 25 } })
+    engRuns.rows = res.runs || []
+    engRuns.tasks = {}
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  } finally {
+    engRuns.loading = false
+  }
+}
+
+async function loadEngTasks(row) {
+  if (!row?.dag_run_id || engRuns.tasks[row.dag_run_id]) return
+  try {
+    const res = await http.get(`/api/airflow/dags/${engRuns.dagId}/runs/${encodeURIComponent(row.dag_run_id)}/tasks`)
+    engRuns.tasks = { ...engRuns.tasks, [row.dag_run_id]: res.tasks || [] }
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  }
+}
+
+function afToStatus(s) {
+  // Airflow 状态 -> 平台色点语义
+  return { success: 'success', failed: 'failed', running: 'running', queued: 'waiting' }[s] || 'waiting'
+}
+function afStateLabel(s) {
+  return { success: '成功', failed: '失败', running: '运行中', queued: '排队' }[s] || (s || '未开始')
+}
+function fmtAfTime(t) {
+  return (t || '').replace('T', ' ').slice(0, 19)
+}
+
 function onTab(name) {
-  if (name === 'channels' && !channels.value.length) loadChannels()
-  if (name === 'records' && !records.value.length) loadRecords()
+  if (name === 'matrix' && !mx.data) {
+    if (!mx.wfId && workflows.value.length) mx.wfId = workflows.value[0].id
+    loadMatrix()
+  }
+  if (name === 'engine' && !eng.status) loadEngine()
 }
 
 onMounted(() => {
-  // 支持 ?workflow_id= 快速过滤
+  // 支持 ?workflow_id= 快速过滤（监控页告警记录深链 ?instance_id= 直接打开实例抽屉）
   const wf = Number(route.query.workflow_id || 0)
-  if (wf) instQ.workflow_id = wf
+  if (wf) {
+    instQ.workflow_id = wf
+    mx.wfId = wf
+  }
   loadWorkflows()
   loadInstances(1)
-  loadChannels()
+  const inst = Number(route.query.instance_id || 0)
+  if (inst) openInstanceById(inst)
 })
+
+onUnmounted(() => clearInterval(mxTimer))
 </script>
 
 <style scoped>
@@ -448,5 +520,39 @@ onMounted(() => {
 }
 .status-cell.failed {
   color: var(--dp-danger);
+}
+
+/* 运行矩阵色块 */
+.mx-cell {
+  display: inline-block;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  cursor: pointer;
+  margin-right: 4px;
+  vertical-align: middle;
+}
+.mx-success { background: var(--dp-ok, #67c23a); }
+.mx-failed { background: var(--dp-danger, #f56c6c); }
+.mx-running { background: var(--dp-accent, #409eff); animation: mx-blink 1.2s infinite alternate; }
+.mx-waiting { background: var(--dp-idle, #c0c4cc); }
+.mx-skipped { background: var(--dp-warn, #e6a23c); }
+.mx-none { background: transparent; border: 1px dashed var(--dp-idle, #c0c4cc); cursor: default; }
+@keyframes mx-blink {
+  from { opacity: 0.45; }
+  to { opacity: 1; }
+}
+.mx-inst {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.eng-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
 }
 </style>

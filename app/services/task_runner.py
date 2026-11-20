@@ -1,5 +1,6 @@
 """任务执行器：工作流实例的拓扑执行、节点分发（datax/sql/python）、日志、血缘。"""
 import datetime
+import json
 import traceback
 from concurrent.futures import ThreadPoolExecutor
 from typing import List
@@ -166,6 +167,8 @@ def run_node(db: Session, run: NodeRun, node: WorkflowNode, logical_date: dateti
         else:
             raise ValueError(f"未知节点类型 {node.node_type}")
         run.status = "success"
+        if isinstance(res, dict) and "written_rows" in res:
+            run.rows_written = int(res.get("written_rows", -1))  # 同步行数（趋势/断流检测）
         log(f"[result] {res}")
         _refresh_meta(db, node, log)
     except Exception as e:
@@ -174,6 +177,44 @@ def run_node(db: Session, run: NodeRun, node: WorkflowNode, logical_date: dateti
     run.finished_at = datetime.datetime.now()
     run.duration_ms = int((run.finished_at - run.started_at).total_seconds() * 1000)
     db.commit()
+
+
+def instance_expected_nodes(inst: TaskInstance, db: Session) -> List[int]:
+    """实例的期望节点集：优先用创建时快照（node_ids），旧数据回退当前工作流节点。"""
+    try:
+        ids = json.loads(inst.node_ids) if inst.node_ids else None
+        if ids:
+            return [int(i) for i in ids]
+    except (ValueError, TypeError):
+        pass
+    return [n.id for n in db.query(WorkflowNode)
+            .filter(WorkflowNode.workflow_id == inst.workflow_id).all()]
+
+
+def _recompute_instance_from_nodes(db: Session, inst: TaskInstance):
+    """Airflow 节点级回调（only_node 模式）后的实例状态：
+    期望节点集全覆盖且全部终态才定终态；有 skipped（未执行）或 failed 即 failed
+    （skipped 说明下游未跑，实例不应记成功）。"""
+    # populate_existing：并发节点回调下，本 session 可能缓存了其他线程写入前的
+    # NodeRun 旧对象（expire_on_commit=False），必须以 DB 最新值覆盖后再判定
+    runs = (db.query(NodeRun).filter(NodeRun.instance_id == inst.id)
+              .populate_existing().all())
+    expected = set(instance_expected_nodes(inst, db))
+    covered = {r.node_id for r in runs}
+    terminal = [r for r in runs if r.status in ("success", "failed", "skipped")]
+    if expected and expected <= covered and len(terminal) == len(runs):
+        failed_runs = [r for r in runs if r.status == "failed"]
+        ok = not failed_runs and all(r.status == "success" for r in runs)
+        inst.status = "success" if ok else "failed"
+        # failed 节点取日志；skipped-only 场景保留 fail 收敛端点写入的原因
+        inst.error = (failed_runs[-1].log or "")[-2000:] if failed_runs else (inst.error or "")
+        inst.finished_at = datetime.datetime.now()
+        db.commit()
+        if not ok:
+            _fire_alerts(db, inst)
+    else:
+        inst.status = "running"
+        db.commit()
 
 
 def run_instance(instance_id: int, only_node: int = None, rerun_failed: bool = False):
@@ -189,6 +230,8 @@ def run_instance(instance_id: int, only_node: int = None, rerun_failed: bool = F
         inst.status = "running"
         inst.started_at = inst.started_at or datetime.datetime.now()
         inst.triggered_by = inst.triggered_by or "scheduler"
+        if only_node is None:
+            inst.node_ids = [n.id for n in nodes]  # 完整执行刷新快照（重跑按当前定义）
         db.commit()
         order = topo_sort(nodes)
         ok, msg = (True, "")
@@ -207,12 +250,13 @@ def run_instance(instance_id: int, only_node: int = None, rerun_failed: bool = F
             if rerun_failed and run and run.status == "success":
                 continue
             if run is None:
+                if only_node is not None:
+                    continue  # 节点级执行只跑目标节点（目标 NodeRun 由调用方预建），
+                    # 其余无运行记录的节点不得创建/执行（否则下游会被顺带跑掉）
                 run = NodeRun(instance_id=inst.id, node_id=node.id, node_name=node.name,
                               node_type=node.node_type, status="waiting")
                 db.add(run)
                 db.commit()
-            elif only_node is not None and run.id != only_node and run.status == "success":
-                continue
             elif only_node is not None and run.id != only_node:
                 continue
             if failed and only_node is None:
@@ -224,12 +268,15 @@ def run_instance(instance_id: int, only_node: int = None, rerun_failed: bool = F
             if run.status == "failed":
                 failed = True
                 first_error = first_error or (run.log or "")[-2000:]
-        inst.status = "failed" if failed else "success"
-        inst.error = first_error
-        inst.finished_at = datetime.datetime.now()
-        db.commit()
-        if failed:
-            _fire_alerts(db, inst)
+        if only_node is not None:
+            _recompute_instance_from_nodes(db, inst)  # 节点级回调：由全部 NodeRun 汇总
+        else:
+            inst.status = "failed" if failed else "success"
+            inst.error = first_error
+            inst.finished_at = datetime.datetime.now()
+            db.commit()
+            if failed:
+                _fire_alerts(db, inst)
     finally:
         db.close()
 

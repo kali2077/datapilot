@@ -34,7 +34,13 @@ if not FERNET_KEY:
 SCHEDULER_ENGINE = os.getenv("SCHEDULER_ENGINE", "local")
 AIRFLOW_URL = os.getenv("AIRFLOW_URL", "http://localhost:8080")
 AIRFLOW_DAGS_DIR = os.getenv("AIRFLOW_DAGS_DIR", "")  # factory DAG 配置目录（airflow 模式必填）
+# Airflow 3.x 认证（JWT Bearer）取用优先级：AIRFLOW_TOKEN 直填
+# > AIRFLOW_TOKEN_FILE（dags 共享卷里 factory 签发的 token 文件）
+# > AIRFLOW_USER/AIRFLOW_PASSWORD 走 POST /auth/token 自动签发
 AIRFLOW_TOKEN = os.getenv("AIRFLOW_TOKEN", "")
+AIRFLOW_TOKEN_FILE = os.getenv("AIRFLOW_TOKEN_FILE", "")
+AIRFLOW_USER = os.getenv("AIRFLOW_USER", "")
+AIRFLOW_PASSWORD = os.getenv("AIRFLOW_PASSWORD", "")
 
 # DataX：设置 DATAX_HOME 后 datax 节点用 datax.py 真实执行，否则内置执行器
 DATAX_HOME = os.getenv("DATAX_HOME", "")

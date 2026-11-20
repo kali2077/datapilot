@@ -48,6 +48,19 @@ MIGRATIONS = {
     "ai_chat_attachment": [
         ("extract", "TEXT"),
     ],
+    "sched_instance": [
+        ("external_run_id", "VARCHAR(128) DEFAULT ''"),
+        ("node_ids", "TEXT"),
+    ],
+    "meta_table": [
+        ("dropped", "BOOLEAN DEFAULT 0"),
+    ],
+    "meta_column": [
+        ("dropped", "BOOLEAN DEFAULT 0"),
+    ],
+    "sched_node_run": [
+        ("rows_written", "INTEGER DEFAULT -1"),
+    ],
 }
 
 

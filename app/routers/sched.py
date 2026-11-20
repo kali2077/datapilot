@@ -7,7 +7,7 @@ from ..db import get_db
 from ..deps import current_user, require_role, ensure_can_manage, client_ip
 from ..models import User, Workflow, WorkflowNode, TaskInstance, NodeRun, AlertChannel, AlertRecord
 from ..services import audit as audit_svc
-from ..services import sched_service, sqlguard
+from ..services import sched_service, sqlguard, task_runner
 
 router = APIRouter(prefix="/api/sched", tags=["sched"])
 
@@ -165,6 +165,7 @@ def delete_wf(wf_id: int, request: Request, force: bool = False,
     db.query(TaskInstance).filter(TaskInstance.workflow_id == wf_id).delete()
     from ..models import LineageEdge
     db.query(LineageEdge).filter(LineageEdge.workflow_id == wf_id).delete()
+    sched_service.remove_airflow_config(wf_id)  # airflow 模式：清 factory 配置防孤儿 DAG
     audit_svc.log(db, user, "sched.wf.delete", "workflow", wf_id,
                   {"name": wf.name, "force": force}, ip=client_ip(request))
     db.delete(wf)
@@ -240,6 +241,126 @@ def rerun_node(run_id: int, request: Request, user: User = Depends(require_role(
     sched_service.rerun_node(db, run_id)
     audit_svc.log(db, user, "sched.node.rerun", "node_run", run_id, ip=client_ip(request))
     return {"ok": True}
+
+
+# ---------------- Airflow 节点级回调 + 运行矩阵 ----------------
+
+class AirflowRunReq(BaseModel):
+    workflow_id: int
+    node_id: int
+    dag_run_id: str
+    logical_date: str = ""
+
+
+class AirflowFailReq(BaseModel):
+    workflow_id: int
+    dag_run_id: str
+    reason: str = ""
+
+
+def _parse_dt(s: str):
+    import datetime
+    if not s:
+        return None
+    try:
+        return datetime.datetime.fromisoformat(s.replace("Z", "+00:00")).replace(tzinfo=None)
+    except ValueError:
+        return None
+
+
+@router.post("/airflow/run")
+def airflow_node_run(req: AirflowRunReq, request: Request,
+                     user: User = Depends(require_role("engineer")),
+                     db: Session = Depends(get_db)):
+    """factory DAG 节点回调：幂等映射平台实例并执行单个节点（Airflow 任务状态即节点状态）。
+
+    跨工作流依赖未满足时返回 waiting（factory 任务原地等待重试，与平台 poller 语义一致）。
+    """
+    wf = db.get(Workflow, req.workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    node = db.get(WorkflowNode, req.node_id)
+    if not node or node.workflow_id != wf.id:
+        raise HTTPException(404, "节点不存在")
+    inst = sched_service.ensure_airflow_instance(db, wf, req.dag_run_id,
+                                                 _parse_dt(req.logical_date))
+    ok, msg = task_runner._deps_satisfied(db, wf, inst.logical_date)
+    if not ok:
+        return {"status": "waiting", "reason": msg, "instance_id": inst.id}
+    run = (db.query(NodeRun).filter(NodeRun.instance_id == inst.id,
+                                    NodeRun.node_id == node.id).first())
+    if run is None:
+        run = NodeRun(instance_id=inst.id, node_id=node.id, node_name=node.name,
+                      node_type=node.node_type, status="waiting")
+        db.add(run)
+        db.commit()
+    task_runner.submit_instance(inst.id, only_node=run.id)
+    return {"status": "submitted", "instance_id": inst.id, "node_run_id": run.id}
+
+
+@router.post("/airflow/fail")
+def airflow_fail(req: AirflowFailReq, user: User = Depends(require_role("engineer")),
+                 db: Session = Depends(get_db)):
+    """factory 任务超时/失败时回调：把实例收敛到 failed 终态。
+
+    Airflow run 已死（等待依赖超时 / 节点执行失败 / 轮询超时），下游任务不会再回调——
+    未执行的期望节点补 skipped 占位，防止实例永远卡在 waiting/running。
+    已终态（success/failed/canceled）的实例不动（幂等）。
+    """
+    wf = db.get(Workflow, req.workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    inst = sched_service.ensure_airflow_instance(db, wf, req.dag_run_id)
+    if inst.status in ("success", "failed", "canceled"):
+        return {"ok": True, "status": inst.status}
+    import datetime
+    reason = (req.reason or "Airflow 侧任务超时/失败")[:2000]
+    existing = {r.node_id for r in db.query(NodeRun).filter(NodeRun.instance_id == inst.id).all()}
+    for nid in task_runner.instance_expected_nodes(inst, db):
+        if nid not in existing:
+            node = db.get(WorkflowNode, nid)
+            db.add(NodeRun(instance_id=inst.id, node_id=nid,
+                           node_name=node.name if node else str(nid),
+                           node_type=node.node_type if node else "",
+                           status="skipped",
+                           log=f"[airflow] {reason}，节点未执行"))
+    inst.status = "failed"
+    inst.error = reason
+    inst.finished_at = datetime.datetime.now()
+    db.commit()
+    task_runner._fire_alerts(db, inst)  # 失败收敛路径同样触发告警（与 recompute/完整跑一致）
+    return {"ok": True, "status": inst.status}
+
+
+@router.get("/matrix")
+def matrix(workflow_id: int, size: int = 15,
+           user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """运行矩阵（Grid 视图）：最近 N 个实例 × 全部节点状态。"""
+    wf = db.get(Workflow, workflow_id)
+    if not wf:
+        raise HTTPException(404, "工作流不存在")
+    nodes = (db.query(WorkflowNode).filter(WorkflowNode.workflow_id == wf.id)
+               .order_by(WorkflowNode.ordinal).all())
+    insts = (db.query(TaskInstance).filter(TaskInstance.workflow_id == wf.id)
+               .order_by(TaskInstance.id.desc())
+               .limit(max(1, min(size, 50))).all())
+    ids = [i.id for i in insts]
+    runs = (db.query(NodeRun).filter(NodeRun.instance_id.in_(ids)).all()
+            if ids else [])
+    cells = {}
+    for r in runs:
+        cells.setdefault(r.instance_id, {})[r.node_id] = {
+            "run_id": r.id, "status": r.status, "duration_ms": r.duration_ms}
+    return {
+        "workflow": {"id": wf.id, "name": wf.name,
+                     "schedule_cron": wf.schedule_cron, "enabled": wf.enabled},
+        "nodes": [{"id": n.id, "name": n.name, "node_type": n.node_type} for n in nodes],
+        "rows": [{"instance_id": i.id, "status": i.status,
+                  "trigger_type": i.trigger_type, "triggered_by": i.triggered_by,
+                  "logical_date": str(i.logical_date),
+                  "started_at": str(i.started_at or ""),
+                  "cells": cells.get(i.id, {})} for i in insts],
+    }
 
 
 # ---------------- SQL 开发工具 ----------------
