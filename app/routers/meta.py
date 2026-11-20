@@ -6,7 +6,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..deps import current_user, require_role, client_ip
-from ..models import User, MetaTable, MetaColumn, GlossaryTerm, FewShot, DataSource
+from ..models import User, MetaTable, MetaColumn, MetaChange, GlossaryTerm, FewShot, DataSource
 from ..services import audit as audit_svc
 from ..services import meta_service, meta_vec_service
 
@@ -95,6 +95,37 @@ def update_table(table_id: int, req: TableUpdateReq, request: Request,
     audit_svc.log(db, user, "meta.table.update", "meta_table", table_id,
                   req.dict(exclude_none=True), ip=client_ip(request))
     return {"ok": True}
+
+
+# ---------------- 资产变更巡检 ----------------
+
+DANGER_CHANGE_TYPES = {"table_removed", "column_removed", "column_altered"}
+
+
+@router.get("/changes")
+def list_changes(datasource_id: int = 0, table_id: int = 0, change_type: str = "",
+                 page: int = 1, size: int = 50,
+                 user: User = Depends(current_user), db: Session = Depends(get_db)):
+    """资产变更巡检记录（元数据采集时自动 diff 生成）。"""
+    q = db.query(MetaChange)
+    if datasource_id:
+        q = q.filter(MetaChange.datasource_id == datasource_id)
+    if table_id:
+        q = q.filter(MetaChange.table_id == table_id)
+    if change_type:
+        q = q.filter(MetaChange.change_type == change_type)
+    total = q.count()
+    rows = (q.order_by(MetaChange.detected_at.desc(), MetaChange.id.desc())
+              .offset((page - 1) * size).limit(size).all())
+    ds_names = {d.id: d.name for d in db.query(DataSource).all()}
+    return {"total": total, "items": [{
+        "id": c.id, "datasource_id": c.datasource_id,
+        "datasource": ds_names.get(c.datasource_id, ""),
+        "table_id": c.table_id, "schema_name": c.schema_name,
+        "table_name": c.table_name, "change_type": c.change_type,
+        "danger": c.change_type in DANGER_CHANGE_TYPES,
+        "detail": c.detail, "detected_at": str(c.detected_at),
+    } for c in rows]}
 
 
 # ---------------- 术语表 ----------------

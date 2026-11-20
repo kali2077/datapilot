@@ -11,6 +11,7 @@
         />
         <el-button type="primary" icon="Search" @click="search(1)">搜索</el-button>
         <div class="spacer" />
+        <el-button icon="Warning" @click="openChanges">变更记录</el-button>
         <span class="muted">共 {{ total }} 张表</span>
       </div>
 
@@ -92,6 +93,30 @@
       </template>
       <div v-else v-loading="true" style="height: 300px" />
     </el-drawer>
+
+    <!-- 资产变更巡检抽屉（数据源级） -->
+    <el-drawer v-model="chgDlg.visible" :title="`资产变更巡检${chgDlg.dsName ? '：' + chgDlg.dsName : '（全部数据源）'}`" size="640px">
+      <div style="display: flex; gap: 8px; margin-bottom: 12px">
+        <el-select v-model="chgDlg.type" placeholder="全部类型" clearable style="width: 150px" @change="loadChanges">
+          <el-option v-for="t in changeTypes" :key="t.v" :label="t.l" :value="t.v" />
+        </el-select>
+        <div class="spacer" />
+        <span class="muted">共 {{ chgTotal }} 条</span>
+      </div>
+      <el-table v-loading="chgDlg.loading" :data="chgItems" size="small" border @row-click="(row) => row.table_id && $router.push(`/assets/${row.table_id}`)">
+        <el-table-column prop="detected_at" label="发现时间" width="165" />
+        <el-table-column label="类型" width="105">
+          <template #default="{ row }">
+            <el-tag :type="row.danger ? 'danger' : 'info'" size="small" effect="plain">{{ chgLabel(row.change_type) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column prop="table_name" label="表" width="150" class-name="mono" show-overflow-tooltip />
+        <el-table-column label="详情" min-width="220" show-overflow-tooltip>
+          <template #default="{ row }">{{ chgDetail(row) }}</template>
+        </el-table-column>
+        <template #empty><el-empty description="暂无变更记录（采集时自动对比上次快照）" /></template>
+      </el-table>
+    </el-drawer>
   </div>
 </template>
 
@@ -112,6 +137,58 @@ const loading = ref(false)
 const q = reactive({ datasource_id: null, keyword: '' })
 
 const drawer = reactive({ visible: false, row: null, detail: null, ownerName: '', manualDesc: '', saving: false })
+
+/* ---------- 资产变更巡检 ---------- */
+import { useRouter } from 'vue-router'
+const router = useRouter()
+const chgItems = ref([])
+const chgTotal = ref(0)
+const chgDlg = reactive({ visible: false, loading: false, type: '' })
+const changeTypes = [
+  { v: 'table_added', l: '新增表' },
+  { v: 'table_removed', l: '删除表' },
+  { v: 'column_added', l: '新增字段' },
+  { v: 'column_removed', l: '删除字段' },
+  { v: 'column_altered', l: '字段变更' },
+  { v: 'comment_changed', l: '注释变更' },
+  { v: 'row_count_changed', l: '行数变化' },
+]
+
+function chgLabel(t) {
+  return (changeTypes.find((x) => x.v === t) || {}).l || t
+}
+
+function chgDetail(row) {
+  const d = row.detail || {}
+  switch (row.change_type) {
+    case 'table_added': return `表被创建进入资产${d.recreated ? '（同名表重建）' : ''}`
+    case 'table_removed': return `表从数据源中被删除${d.last_row_count >= 0 ? `（最后行数 ${d.last_row_count}）` : ''}`
+    case 'column_added': return `新增字段 ${d.column}${d.data_type ? ` (${d.data_type})` : ''}`
+    case 'column_removed': return `字段 ${d.column} 被删除${d.old_type ? `（原类型 ${d.old_type}）` : ''}`
+    case 'column_altered': return `字段 ${d.column}：${d.old_type || '-'} → ${d.new_type || '-'}${d.old_pk !== d.new_pk ? `，主键 ${d.old_pk} → ${d.new_pk}` : ''}`
+    case 'comment_changed': return `表注释变更：${d.old || '(空)'} → ${d.new || '(空)'}`
+    case 'row_count_changed': return `行数 ${d.old} → ${d.new}（${d.pct > 0 ? '+' : ''}${d.pct}%）`
+    default: return JSON.stringify(d)
+  }
+}
+
+async function openChanges() {
+  chgDlg.visible = true
+  await loadChanges()
+}
+
+async function loadChanges() {
+  chgDlg.loading = true
+  try {
+    const res = await http.get('/api/meta/changes', {
+      params: { datasource_id: q.datasource_id || 0, change_type: chgDlg.type || '', size: 100 },
+    })
+    chgItems.value = res.items
+    chgTotal.value = res.total
+  } catch { /* ignore */ } finally {
+    chgDlg.loading = false
+  }
+}
 
 async function loadDs() {
   try {

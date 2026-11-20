@@ -21,6 +21,7 @@ class MetaTable(Base):
     owner_name: Mapped[str] = mapped_column(String(64), default="")
     row_count: Mapped[int] = mapped_column(Integer, default=-1)
     last_collected_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    dropped: Mapped[bool] = mapped_column(Boolean, default=False)  # 源中已删除（变更巡检防重标志，记录保留）
     updated_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, onupdate=datetime.now)
 
 
@@ -36,6 +37,25 @@ class MetaColumn(Base):
     ordinal: Mapped[int] = mapped_column(Integer, default=0)
     is_pk: Mapped[bool] = mapped_column(Boolean, default=False)
     sample_values: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    dropped: Mapped[bool] = mapped_column(Boolean, default=False)  # 源中已删除（变更巡检防重标志）
+
+
+class MetaChange(Base):
+    """资产变更巡检记录：元数据采集时与上次快照对比自动生成（零配置）。
+
+    change_type: table_added / table_removed / column_added / column_removed /
+                 column_altered / comment_changed / row_count_changed
+    detail: 各类型的结构化明细（column/old/new/pct 等）。
+    """
+    __tablename__ = "meta_change"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    datasource_id: Mapped[int] = mapped_column(Integer, index=True)
+    table_id: Mapped[int] = mapped_column(Integer, default=0)
+    schema_name: Mapped[str] = mapped_column(String(128), default="")
+    table_name: Mapped[str] = mapped_column(String(128), index=True)
+    change_type: Mapped[str] = mapped_column(String(32), index=True)
+    detail: Mapped[dict] = mapped_column(JSON, default=dict)
+    detected_at: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
 
 
 class LineageEdge(Base):

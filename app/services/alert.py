@@ -74,3 +74,25 @@ def _send_webhook(cfg: dict, title: str, content: str, inst=None):
         headers["X-Timestamp"] = ts
     resp = httpx.post(url, json=payload, headers=headers, timeout=15)
     resp.raise_for_status()
+
+
+def fire_custom_alert(db: Session, title: str, content: str):
+    """通用告警（非任务类，如资产变更巡检）：发到所有启用通道并落记录。
+
+    instance_id=0 是非任务告警的既有惯例（监控告警同款），前端告警记录对 0 渲染 "-"。
+    """
+    channels = db.query(AlertChannel).filter(AlertChannel.enabled == True).all()  # noqa: E712
+    for ch in channels:
+        status = "ok"
+        try:
+            if ch.type == "email":
+                _send_email(ch.config or {}, title, content)
+            elif ch.type == "webhook":
+                _send_webhook(ch.config or {}, title, content, None)
+            else:
+                status = "failed"
+        except Exception:
+            status = "failed"
+        db.add(AlertRecord(channel_id=ch.id, channel_name=ch.name, instance_id=0,
+                           title=title[:256], content=content, status=status))
+    db.commit()

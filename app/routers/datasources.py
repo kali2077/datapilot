@@ -5,7 +5,7 @@ from sqlalchemy.orm import Session
 from ..db import get_db
 from ..deps import current_user, require_role, ensure_can_manage, can_manage, client_ip
 from ..models import User, DataSource, SyncJob, ApiDef, MonitorRule, SavedQuery, \
-    MetaTable, MetaColumn, TableTag, LineageEdge
+    MetaTable, MetaColumn, MetaChange, TableTag, LineageEdge
 from ..security import encrypt_secret
 from ..services import audit as audit_svc
 from ..services import engine_registry, meta_service
@@ -117,6 +117,7 @@ def delete_ds(ds_id: int, request: Request, user: User = Depends(require_role("e
         db.query(MetaColumn).filter(MetaColumn.table_id.in_(table_ids)).delete(synchronize_session=False)
         db.query(TableTag).filter(TableTag.table_id.in_(table_ids)).delete(synchronize_session=False)
     db.query(MetaTable).filter(MetaTable.datasource_id == ds_id).delete(synchronize_session=False)
+    db.query(MetaChange).filter(MetaChange.datasource_id == ds_id).delete(synchronize_session=False)
     db.query(LineageEdge).filter((LineageEdge.source_datasource_id == ds_id) |
                                  (LineageEdge.target_datasource_id == ds_id)) \
         .delete(synchronize_session=False)

@@ -40,7 +40,7 @@
     </div>
 
     <div class="page-card">
-      <el-tabs v-model="tab">
+      <el-tabs v-model="tab" @tab-change="onTab">
         <el-tab-pane label="字段信息" name="columns">
           <el-table v-if="detail" :data="detail.columns || []" stripe size="small" border>
             <el-table-column prop="name" label="字段" min-width="150">
@@ -144,6 +144,25 @@
             <template #empty><el-empty description="暂无相关工作流" :image-size="70" /></template>
           </el-table>
         </el-tab-pane>
+
+        <el-tab-pane label="变更记录" name="changes" lazy>
+          <el-table v-loading="chgLoading" :data="changes" stripe size="small" border>
+            <el-table-column prop="detected_at" label="发现时间" width="170" />
+            <el-table-column label="类型" width="110">
+              <template #default="{ row }">
+                <el-tag :type="row.danger ? 'danger' : 'info'" size="small" effect="plain">
+                  {{ changeLabel(row.change_type) }}
+                </el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="变更详情" min-width="320" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span :class="{ 'chg-danger': row.danger }">{{ changeDetail(row) }}</span>
+              </template>
+            </el-table-column>
+            <template #empty><el-empty description="采集巡检暂未发现变更（首次采集建立基线）" :image-size="70" /></template>
+          </el-table>
+        </el-tab-pane>
       </el-tabs>
     </div>
 
@@ -194,6 +213,54 @@ async function load() {
   } catch { /* ignore */ }
 }
 
+/* ---------- 变更记录（自动巡检） ---------- */
+const changes = ref([])
+const chgLoading = ref(false)
+let chgLoaded = false
+
+function changeLabel(t) {
+  return { table_added: '新增表', table_removed: '删除表', column_added: '新增字段',
+           column_removed: '删除字段', column_altered: '字段变更',
+           comment_changed: '注释变更', row_count_changed: '行数变化' }[t] || t
+}
+
+function changeDetail(row) {
+  const d = row.detail || {}
+  switch (row.change_type) {
+    case 'table_added':
+      return `表被创建进入资产${d.recreated ? '（同名表重建）' : ''}`
+    case 'table_removed':
+      return `表从数据源中被删除${d.last_row_count >= 0 ? `（最后行数 ${d.last_row_count}）` : ''}`
+    case 'column_added':
+      return `新增字段 ${d.column}${d.data_type ? ` (${d.data_type})` : ''}${d.recreated ? '，字段复活' : ''}`
+    case 'column_removed':
+      return `字段 ${d.column} 被删除${d.old_type ? `（原类型 ${d.old_type}）` : ''}`
+    case 'column_altered': {
+      const seg = [`类型 ${d.old_type || '-'} → ${d.new_type || '-'}`]
+      if (d.old_pk !== d.new_pk) seg.push(`主键 ${d.old_pk} → ${d.new_pk}`)
+      return `字段 ${d.column} 变更：${seg.join('，')}`
+    }
+    case 'comment_changed':
+      return `表注释变更：${d.old || '(空)'} → ${d.new || '(空)'}`
+    case 'row_count_changed':
+      return `行数 ${d.old} → ${d.new}（${d.pct > 0 ? '+' : ''}${d.pct}%）`
+    default:
+      return JSON.stringify(d)
+  }
+}
+
+async function loadChanges() {
+  if (chgLoaded) return
+  chgLoaded = true
+  chgLoading.value = true
+  try {
+    const res = await http.get('/api/meta/changes', { params: { table_id: tableId, size: 50 } })
+    changes.value = res.items
+  } catch { /* ignore */ } finally {
+    chgLoading.value = false
+  }
+}
+
 async function loadAllTags() {
   try {
     allTags.value = await http.get('/api/asset/tags')
@@ -241,4 +308,14 @@ onMounted(() => {
   load()
   loadAllTags()
 })
+
+function onTab(name) {
+  if (name === 'changes') loadChanges()
+}
 </script>
+
+<style scoped>
+.chg-danger {
+  color: var(--el-color-danger);
+}
+</style>
