@@ -35,7 +35,9 @@ def test_chat_create_sync_and_confirm(client, tokens):
                     json={"text": "把 c_src2 的 orders 表每天凌晨2点同步到 c_dst2 的 ods_orders"})
     body = r.json()
     assert body["card"]["type"] == "confirm", body["content"]
-    assert body["card"]["trial"]["stats"]["written_rows"] == 40
+    # 试跑为校验模式（确认前不写目标表）：只读源验证
+    assert body["card"]["trial"]["stats"]["read_rows"] == 40
+    assert body["card"]["trial"]["stats"]["written_rows"] == 0
     assert body["confirm_token"]    # 确认上线
     r = client.post(f"/api/chat/sessions/{sid}/confirm", headers=h,
                     json={"message_id": body["message_id"], "token": body["confirm_token"]})

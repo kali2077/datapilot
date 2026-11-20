@@ -33,6 +33,11 @@ export const MENU = [
     items: [
       { path: '/integration', label: '数据集成', icon: 'Connection', roles: ['admin', 'engineer'] },
       { path: '/workflows', label: '工作流开发', icon: 'SetUp', roles: ['admin', 'engineer'] },
+    ],
+  },
+  {
+    title: '运维监控',
+    items: [
       { path: '/ops', label: '调度运维', icon: 'Monitor', roles: ['admin', 'engineer'] },
       { path: '/monitoring', label: '数据监控告警', icon: 'Bell', roles: ['admin', 'engineer'] },
     ],

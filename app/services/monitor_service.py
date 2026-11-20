@@ -8,7 +8,8 @@ from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
-from ..models import MonitorRule, MonitorCheck, DataSource, Workflow, TaskInstance, AlertChannel, AlertRecord
+from ..models import (MonitorRule, MonitorCheck, DataSource, Workflow, TaskInstance, NodeRun,
+                      AlertChannel, AlertRecord)
 from . import sqlguard
 from .engine_registry import run_query
 
@@ -44,7 +45,7 @@ def check_rule(db: Session, rule: MonitorRule) -> MonitorCheck:
     t0 = datetime.datetime.now()
     status, metric, message = "passed", "", ""
     try:
-        if rule.rule_type == "task_duration":
+        if rule.rule_type in ("task_duration", "sync_halt"):
             status, metric, message = _CHECKERS[rule.rule_type](db, rule, None)
         else:
             ds = db.get(DataSource, rule.datasource_id)
@@ -193,6 +194,32 @@ def _check_task_duration(db: Session, rule: MonitorRule, ds: DataSource):
     return "passed", metric, ""
 
 
+def _check_sync_halt(db: Session, rule: MonitorRule, ds: DataSource):
+    """同步断流：最近一次成功实例的写入行数 < min_rows 即告警（源端断流/上游断供检测）。"""
+    p = rule.params or {}
+    wf_name = p.get("workflow_name") or ""
+    min_rows = int(p.get("min_rows", 1))
+    wf = db.query(Workflow).filter(Workflow.name == wf_name).first()
+    if not wf:
+        return "error", "", f"工作流不存在: {wf_name}"
+    inst = (db.query(TaskInstance)
+              .filter(TaskInstance.workflow_id == wf.id,
+                      TaskInstance.status == "success")
+              .order_by(TaskInstance.id.desc()).first())
+    if not inst:
+        return "passed", "暂无成功实例", "工作流尚无成功运行实例，跳过断流判定"
+    row = (db.query(NodeRun)
+             .filter(NodeRun.instance_id == inst.id, NodeRun.rows_written >= 0)
+             .order_by(NodeRun.id.desc()).first())
+    rows = row.rows_written if row else -1
+    metric = f"实例 #{inst.id} 写入 {rows} 行（阈值 ≥ {min_rows}）"
+    if rows < 0:
+        return "passed", metric, "实例无同步节点或行数未知，跳过"
+    if rows < min_rows:
+        return "failed", metric, f"同步写入 {rows} 行低于阈值 {min_rows} 行，疑似源端断流"
+    return "passed", metric, ""
+
+
 _CHECKERS = {
     "row_count_fluctuation": _check_row_count_fluctuation,
     "row_count_threshold": _check_row_count_threshold,
@@ -201,6 +228,7 @@ _CHECKERS = {
     "freshness": _check_freshness,
     "sql_check": _check_sql,
     "task_duration": _check_task_duration,
+    "sync_halt": _check_sync_halt,
 }
 
 RULE_TYPES = list(_CHECKERS.keys())

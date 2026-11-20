@@ -243,31 +243,73 @@ def validate_job(db: Session, job: SyncJob, trial: bool = False) -> List[dict]:
     if inc.get("enabled") and not job.source_query:
         if not inc.get("column"):
             issues.append({"level": "error", "message": "启用增量但未指定增量列"})
+        mode = inc.get("mode", "max_value")
+        if mode == "time_range" and not inc.get("expr"):
+            issues.append({"level": "error",
+                           "message": "增量模式=按表达式 但未填写时间表达式（如 ${bizdate}）；"
+                                      "留空将按断点续传执行"})
+        elif mode == "max_value":
+            issues.append({"level": "info",
+                           "message": f"增量模式=断点续传：首次自动全量，此后只同步 {inc['column']} 大于目标当前最大值的数据"})
     wm = (job.config or {}).get("write_mode", "append")
     if wm not in ("append", "truncate_insert", "replace"):
         issues.append({"level": "error", "message": f"未知写入模式: {wm}"})
+    # 合并键（upsert）
+    keys = (job.config or {}).get("upsert_keys") or []
+    if keys:
+        known = {c["target"] for c in cols}
+        unknown = [k for k in keys if k not in known]
+        if unknown:
+            issues.append({"level": "error",
+                           "message": f"合并键不在目标列中: {', '.join(unknown)}"})
+        if wm in ("truncate_insert", "replace"):
+            issues.append({"level": "warning",
+                           "message": "合并键对 truncate_insert/replace 无意义（每次全量重写），建议改用 append"})
+        if dst.type in ("doris", "starrocks", "clickhouse"):
+            issues.append({"level": "info",
+                           "message": f"{dst.type} 合并在建表时落定（UNIQUE KEY/ReplacingMergeTree），已有表不自动改模型"})
+        elif dst.type not in ("mysql", "postgres"):
+            issues.append({"level": "info",
+                           "message": f"{dst.type} 走通用兜底合并（先删本批同键行再插入）"})
     # cron 在调度层校验
     return issues
 
 
 def suggest_target_ddl(db: Session, job: SyncJob, cols: Optional[List[dict]] = None) -> str:
-    """目标表不存在时的自动建表 DDL 建议（按目标引擎方言生成）。"""
+    """目标表不存在时的自动建表 DDL 建议（按目标引擎方言生成）。
+
+    配置了 upsert_keys（合并键）时按引擎生成合并友好的表模型：
+    mysql/sqlite/postgres -> PRIMARY KEY；doris/starrocks -> UNIQUE KEY 模型；
+    clickhouse -> ReplacingMergeTree（后台合并去重）。
+    """
     dst = db.get(DataSource, job.target_datasource_id)
     cols = cols if cols else ((job.config or {}).get("columns") or [])
     if not cols:
         return ""
     t = dst.type if dst else "mysql"
     q = '"' if t in ("trino", "postgres", "oracle") else "`"
+    keys = [k for k in ((job.config or {}).get("upsert_keys") or [])
+            if k in {c["target"] for c in cols}]
     defs = []
     for c in cols:
         tt = c.get("target_type") or ("STRING" if t in ("hive", "spark", "maxcompute") else "TEXT")
         defs.append(f"  {q}{c['target']}{q} {tt}")
+    if keys and t in ("mysql", "sqlite", "postgres"):
+        kq = ", ".join(f"{q}{k}{q}" for k in keys)
+        defs.append(f"  PRIMARY KEY ({kq})")
     name = f"{q}{job.target_table}{q}"
     ddl = f"CREATE TABLE IF NOT EXISTS {name} (\n" + ",\n".join(defs) + "\n)"
+    if keys and t in ("doris", "starrocks"):
+        kq = ", ".join(f"`{k}`" for k in keys)
+        ddl += f" UNIQUE KEY ({kq}) DISTRIBUTED BY HASH(`{keys[0]}`)"
     if t == "mysql":
         ddl += " DEFAULT CHARSET=utf8mb4"
     if t == "clickhouse":
-        ddl += " ENGINE = MergeTree ORDER BY tuple()"
+        if keys:
+            kq = ", ".join(f"`{k}`" for k in keys)
+            ddl += f" ENGINE = ReplacingMergeTree ORDER BY ({kq})"
+        else:
+            ddl += " ENGINE = MergeTree ORDER BY tuple()"
     if t in ("hive", "spark"):
         ddl += " STORED AS PARQUET"
     if t == "maxcompute":
@@ -470,11 +512,19 @@ def build_source_sql(db: Session, job: SyncJob, limit: Optional[int] = None,
 
 
 def run_sync(db: Session, job: SyncJob, limit: Optional[int] = None, log=print,
-             logical_date: Optional[datetime.datetime] = None) -> dict:
-    """内置执行器：SQLAlchemy 跨源复制（增量/全量/写入模式/自动建表）。MaxCompute 走 pyodps 通道。"""
+             logical_date: Optional[datetime.datetime] = None,
+             dry_run: bool = False) -> dict:
+    """内置执行器：SQLAlchemy 跨源复制（增量/全量/写入模式/自动建表）。MaxCompute 走 pyodps 通道。
+
+    dry_run=True（试跑校验模式）：读源取样本行但**不写目标、不执行 pre/post_sql、
+    不清理目标数据** —— 目标表仍会自动创建（空表不影响 max_value 断点），
+    用于发布前验证列映射与 SQL，且不污染增量断点。
+    """
     src0 = db.get(DataSource, job.source_datasource_id)
     dst0 = db.get(DataSource, job.target_datasource_id)
     if (src0 and src0.type == "maxcompute") or (dst0 and dst0.type == "maxcompute"):
+        if dry_run:
+            log("[trial] MaxCompute 通道暂不支持校验模式，本次按真实执行")
         return _run_sync_mc(db, job, limit=limit, log=log, logical_date=logical_date)
     t0 = time.time()
     src, sql, params, cols = build_source_sql(db, job, limit=limit, logical_date=logical_date)
@@ -486,13 +536,29 @@ def run_sync(db: Session, job: SyncJob, limit: Optional[int] = None, log=print,
     dst = db.get(DataSource, job.target_datasource_id)
     cfg = job.config or {}
     write_mode = cfg.get("write_mode", "append")
-    log(f"[job] {job.name} 源={src.name} 目标={dst.name}.{job.target_table} 模式={write_mode}")
+    log(f"[job] {job.name} 源={src.name} 目标={dst.name}.{job.target_table} 模式={write_mode}"
+        + ("（校验模式，不写入）" if dry_run else ""))
     if config.DATAX_HOME and limit is None:
         log("[engine] 已配置 DATAX_HOME —— 生产执行应走 DataX；本路径为内置执行器（见任务详情 JSON）")
     src_eng = get_engine(src)
     created = ensure_target_table(db, job, cols, log)
     dst_eng = get_engine(dst)
     total = 0
+
+    if dry_run:
+        # 校验模式：只读源取样本，目标侧零写入（pre_sql/post_sql 均不执行）
+        with src_eng.connect().execution_options(stream_results=True) as sconn:
+            result = sconn.execute(_text(sql), params)
+            cols_name = list(result.keys())
+            rows = result.fetchmany(min(limit or 100, 100))
+            preview = [[None if v is None else (str(v) if isinstance(v, (dict, list)) else v)
+                        for v in r] for r in rows]
+        dur = int((time.time() - t0) * 1000)
+        log(f"[done] 校验模式：读取 {len(preview)} 行样本（未写入目标），耗时 {dur}ms")
+        return {"read_rows": len(preview), "written_rows": 0, "duration_ms": dur,
+                "auto_created": created, "dry_run": True,
+                "preview_cols": cols_name, "preview_rows": preview}
+
     # pre_sql：写入前在目标库执行（如清史/建中间表）
     if (cfg.get("pre_sql") or "").strip():
         with dst_eng.begin() as dconn:
@@ -524,9 +590,36 @@ def run_sync(db: Session, job: SyncJob, limit: Optional[int] = None, log=print,
                 else:
                     dconn.execute(_text(f'DELETE FROM `{job.target_table}`'))
                     log("[write] replace: 已清空目标表（未配置分区列）")
+            # 合并键（upsert）：按引擎选写入策略 —— 同键数据合并而非追加
+            #   mysql -> ON DUPLICATE KEY UPDATE | postgres -> ON CONFLICT DO UPDATE
+            #   其余（sqlite/oracle/mssql/hive/trino...）-> 分批先删本批键再插（兜底）；
+            #   doris/starrocks（UNIQUE KEY 模型）与 clickhouse（ReplacingMergeTree）在建表时落定，写法不变
+            upsert_keys = [k for k in (cfg.get("upsert_keys") or []) if k in tgt_cols]
+            q = '"' if dst.type in ("postgres", "oracle", "trino") else "`"
             ph = ", ".join(f":c{i}" for i in range(len(tgt_cols)))
-            ins_sql = (f'INSERT INTO `{job.target_table}` (' +
-                       ", ".join(f'`{c}`' for c in tgt_cols) + f") VALUES ({ph})")
+            collist = ", ".join(f"{q}{c}{q}" for c in tgt_cols)
+            ins_sql = f"INSERT INTO {q}{job.target_table}{q} ({collist}) VALUES ({ph})"
+            del_sql = ""
+            if upsert_keys:
+                nonkey = [c for c in tgt_cols if c not in upsert_keys]
+                if dst.type == "mysql":
+                    if nonkey:
+                        upd = ", ".join(f"`{c}`=VALUES(`{c}`)" for c in nonkey)
+                        ins_sql += f" ON DUPLICATE KEY UPDATE {upd}"
+                    else:
+                        ins_sql = ins_sql.replace("INSERT INTO", "INSERT IGNORE INTO", 1)
+                elif dst.type == "postgres":
+                    kq = ", ".join(f'"{k}"' for k in upsert_keys)
+                    if nonkey:
+                        upd = ", ".join(f'"{c}"=EXCLUDED."{c}"' for c in nonkey)
+                        ins_sql += f" ON CONFLICT ({kq}) DO UPDATE SET {upd}"
+                    else:
+                        ins_sql += f" ON CONFLICT ({kq}) DO NOTHING"
+                else:
+                    where = " AND ".join(f"{q}{k}{q} = :uk{i}" for i, k in enumerate(upsert_keys))
+                    del_sql = f"DELETE FROM {q}{job.target_table}{q} WHERE {where}"
+                log(f"[write] 合并键（upsert）生效: {upsert_keys}（{dst.type}）")
+            key_idx = [tgt_cols.index(k) for k in upsert_keys] if upsert_keys else []
             for rows in chunk_iter():
                 batch = []
                 for r in rows:
@@ -534,6 +627,10 @@ def run_sync(db: Session, job: SyncJob, limit: Optional[int] = None, log=print,
                     for i, v in enumerate(r):
                         d[f"c{i}"] = None if v is None else (str(v) if isinstance(v, (dict, list)) else v)
                     batch.append(d)
+                if del_sql:  # 兜底策略：先删本批同键行再插（幂等合并）
+                    dconn.execute(_text(del_sql),
+                                  [{f"uk{i}": d[f"c{key_idx[i]}"] for i in range(len(key_idx))}
+                                   for d in batch])
                 dconn.execute(_text(ins_sql), batch)
                 total += len(batch)
                 if total % 20000 < len(batch):
@@ -656,10 +753,19 @@ def _qi(ds_type: str, name: str) -> str:
     return f'"{name}"' if ds_type in ("trino", "postgres", "oracle") else f"`{name}`"
 
 
-def trial_run(db: Session, job: SyncJob, limit: int = 100, log=print) -> dict:
-    """试跑 N 行，返回样本与统计；不改动状态。"""
+def trial_run(db: Session, job: SyncJob, limit: int = 100, log=print,
+              dry_run: bool = True) -> dict:
+    """试跑 N 行，返回样本与统计；不改动状态。
+
+    默认 dry_run=True（校验模式）：只读源不写目标 —— 不污染 max_value 增量断点；
+    dry_run=False（真实写入）：走完整写入链路，验证 INSERT 对齐与写入模式。
+    """
     from .engine_registry import run_query
-    stats = run_sync(db, job, limit=limit, log=log)
+    stats = run_sync(db, job, limit=limit, log=log, dry_run=dry_run)
+    if stats.get("dry_run"):
+        return {"stats": stats, "columns": stats.get("preview_cols") or [],
+                "rows": [ [str(v) if v is not None else None for v in r]
+                          for r in (stats.get("preview_rows") or [])[:10]]}
     dst = db.get(DataSource, job.target_datasource_id)
     try:
         sample_cols, sample_rows, _ = run_query(dst, f'SELECT * FROM {_qi(dst.type, job.target_table)} LIMIT 10',
@@ -746,7 +852,12 @@ def rollback_job(db: Session, job: SyncJob, version: int) -> dict:
 
 
 def delete_job(db: Session, job: SyncJob) -> dict:
-    """删除任务：仅 draft/offline；随任务清理版本/血缘；无实例的伴随工作流一并删除。"""
+    """删除任务：仅 draft/offline；随任务清理版本/血缘；无实例的伴随工作流一并删除。
+
+    有实例的工作流保留（供历史实例查看），但必须切断 sync_job_id 关联并让出任务名——
+    否则新任务复用被删任务的 id（SQLite rowid 复用/同 id 新建）时，
+    publish_job 的 sync_job_id 查找会命中残留工作流，把新任务绑到旧工作流上。
+    """
     if job.status == "published":
         raise ValueError("已发布任务不可删除，请先下线")
     from ..models import TaskInstance
@@ -757,7 +868,9 @@ def delete_job(db: Session, job: SyncJob) -> dict:
             TaskInstance.workflow_id == wf.id).count() > 0
         if has_instances:
             wf.enabled = False
-            wf_info = {"workflow_id": wf.id, "kept": "已有运行实例，工作流保留并停用"}
+            wf.sync_job_id = 0  # 切断与已删任务的关联（防 id 复用错绑）
+            wf.name = f"{wf.name[:117]}_deleted_{wf.id}"  # 让出任务名（防超 128 上限），新任务可重建同名工作流
+            wf_info = {"workflow_id": wf.id, "kept": "已有运行实例，工作流保留并停用（已解除关联）"}
         else:
             db.query(WorkflowNode).filter(WorkflowNode.workflow_id == wf.id).delete()
             db.delete(wf)

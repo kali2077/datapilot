@@ -250,8 +250,10 @@ def bulk_sync(req: BulkReq, request: Request,
 # ================================================================ 数据比对
 
 @router.post("/integ/jobs/{job_id}/compare")
-def compare_job(job_id: int, request: Request, sample_rows: int = 200,
+def compare_job(job_id: int, request: Request, sample_rows: int = 200, mode: str = "sample",
                 user: User = Depends(require_role("engineer")), db: Session = Depends(get_db)):
+    """数据比对。mode=sample：行数 + 抽样元组差集；mode=chunk：按合并键/增量列分 10 块逐块计数
+    （全量计数级校验，块不一致时定位差异区间），另附抽样差集作参考。"""
     from collections import Counter
     job = db.get(SyncJob, job_id)
     if not job:
@@ -260,15 +262,56 @@ def compare_job(job_id: int, request: Request, sample_rows: int = 200,
         raise HTTPException(400, "任务无源表，无法比对")
     src = db.get(DataSource, job.source_datasource_id)
     dst = db.get(DataSource, job.target_datasource_id)
+    if mode == "chunk" and not job.source_table:
+        raise HTTPException(400, "自定义查询任务无源表键列，仅支持抽样比对")
     n = max(10, min(sample_rows, 5000))
 
-    def count(ds, table):
-        cols, rows, _ = run_query(ds, f"SELECT COUNT(*) AS c FROM {_qi(ds.type, table)}",
+    def count(ds, table, where=""):
+        cols, rows, _ = run_query(ds, f"SELECT COUNT(*) AS c FROM {_qi(ds.type, table)}{where}",
                                   max_rows=1, timeout_s=120)
         return int(rows[0][0])
 
     src_cnt = count(src, job.source_table)
     dst_cnt = count(dst, job.target_table)
+    out = {
+        "source": {"datasource": src.name, "table": job.source_table, "rows": src_cnt},
+        "target": {"datasource": dst.name, "table": job.target_table, "rows": dst_cnt},
+        "row_diff": src_cnt - dst_cnt,
+        "mode": mode,
+    }
+    consistent = src_cnt == dst_cnt
+
+    if mode == "chunk" and job.source_table:
+        # 分块校验：选键列（合并键 > 增量列 > 首个映射列），源/目标各自 min-max 分 10 块逐块 COUNT
+        cfg = job.config or {}
+        key = next((k for k in (cfg.get("upsert_keys") or [])
+                    if k in {c["target"] for c in (cfg.get("columns") or [])}), None)
+        key = key or (cfg.get("increment") or {}).get("column") \
+            or ((cfg.get("columns") or [{}])[0].get("target"))
+        if not key:
+            raise HTTPException(400, "无可用键列（合并键/增量列/列映射均空），无法分块比对")
+        _, s_minmax, _ = run_query(src, f"SELECT MIN({_qi(src.type, key)}), MAX({_qi(src.type, key)})"
+                                        f" FROM {_qi(src.type, job.source_table)}", max_rows=1, timeout_s=120)
+        lo, hi = s_minmax[0][0], s_minmax[0][1]
+        chunks, chunk_diffs, ok_chunks = 10, [], 0
+        try:
+            step = (int(hi) - int(lo) + 1) / chunks
+        except (ValueError, TypeError):
+            raise HTTPException(400, f"键列 {key} 需为数值类型才能分块比对")
+        for i in range(chunks):
+            a = int(lo) + int(i * step)
+            b = int(lo) + int((i + 1) * step) - (1 if i < chunks - 1 else 0)
+            w = f" WHERE {_qi(src.type, key)} BETWEEN {a} AND {b}"
+            sc_i = count(src, job.source_table, w)
+            dc_i = count(dst, job.target_table, w.replace(_qi(src.type, key), _qi(dst.type, key)))
+            if sc_i == dc_i:
+                ok_chunks += 1
+            else:
+                chunk_diffs.append({"range": f"[{a}, {b}]", "source": sc_i, "target": dc_i})
+        out.update({"chunk_key": key, "chunks_total": chunks, "chunks_ok": ok_chunks,
+                    "chunk_diffs": chunk_diffs})
+        consistent = consistent and not chunk_diffs
+
     # 抽样值集比对（全列元组 str 化）
     _, s_rows, _ = run_query(src, f"SELECT * FROM {_qi(src.type, job.source_table)} LIMIT {n}",
                              max_rows=n, timeout_s=120)
@@ -278,17 +321,13 @@ def compare_job(job_id: int, request: Request, sample_rows: int = 200,
         Counter(tuple(str(v) for v in r) for r in d_rows)
     only_src = list((sc - dc).elements())
     only_dst = list((dc - sc).elements())
+    out["sample"] = {"rows": n, "only_in_source": len(only_src), "only_in_target": len(only_dst),
+                     "src_examples": [list(r)[:6] for r in only_src[:5]],
+                     "dst_examples": [list(r)[:6] for r in only_dst[:5]]}
+    out["consistent"] = consistent and not only_src and not only_dst
     audit_svc.log(db, user, "integ.compare", "sync_job", job.id,
-                  {"src": src_cnt, "dst": dst_cnt}, ip=client_ip(request))
-    return {
-        "source": {"datasource": src.name, "table": job.source_table, "rows": src_cnt},
-        "target": {"datasource": dst.name, "table": job.target_table, "rows": dst_cnt},
-        "row_diff": src_cnt - dst_cnt,
-        "sample": {"rows": n, "only_in_source": len(only_src), "only_in_target": len(only_dst),
-                   "src_examples": [list(r)[:6] for r in only_src[:5]],
-                   "dst_examples": [list(r)[:6] for r in only_dst[:5]]},
-        "consistent": src_cnt == dst_cnt and not only_src and not only_dst,
-    }
+                  {"src": src_cnt, "dst": dst_cnt, "mode": mode}, ip=client_ip(request))
+    return out
 
 
 # ================================================================ 主机指标

@@ -60,7 +60,7 @@ def create_rule(req: RuleReq, request: Request,
                 user: User = Depends(require_role("engineer")), db: Session = Depends(get_db)):
     if req.rule_type not in monitor_service.RULE_TYPES:
         raise HTTPException(400, f"未知规则类型: {req.rule_type}")
-    if req.rule_type != "task_duration":
+    if req.rule_type not in ("task_duration", "sync_halt"):
         if not db.get(DataSource, req.datasource_id):
             raise HTTPException(400, "数据源不存在")
     if req.cron:

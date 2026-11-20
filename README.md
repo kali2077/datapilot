@@ -118,13 +118,13 @@ tests/                 # 30 个用例（单元 + e2e）
 <tr><td><img src="docs/screenshots/03-datasources.png?v=2" width="49%"/><img src="docs/screenshots/04-hadoop.png?v=2" width="49%"/></td></tr>
 <tr><td colspan="2"><b>12 种数据源</b> · <b>Hadoop 平台</b>（集群注册 / 连通测试 / 一键派生 / Kerberos keytab）</td></tr>
 <tr><td><img src="docs/screenshots/05-metadata.png?v=2" width="49%"/><img src="docs/screenshots/06-query.png?v=2" width="49%"/></td></tr>
-<tr><td colspan="2"><b>元数据管理（采集 / 注释 / 负责人）</b> · <b>数据查询工作台（只读护栏 / 自动 LIMIT / CSV 导出）</b></td></tr>
+<tr><td colspan="2"><b>元数据管理（采集 / 变更自动巡检 / 注释 / 负责人）</b> · <b>数据查询工作台（只读护栏 / 自动 LIMIT / CSV 导出）</b></td></tr>
 <tr><td><img src="docs/screenshots/07-assets.png?v=2" width="49%"/><img src="docs/screenshots/15-asset-lineage.png?v=2" width="49%"/></td></tr>
 <tr><td colspan="2"><b>数据资产地图（搜索 / 标签）</b> · <b>表详情 + SVG 血缘图</b></td></tr>
 <tr><td><img src="docs/screenshots/08-integration.png?v=2" width="49%"/><img src="docs/screenshots/09-workflows.png?v=2" width="49%"/></td></tr>
 <tr><td colspan="2"><b>数据集成（校验 / 试跑 / 版本化 / 整库同步 / 文件导入 / 数据比对）</b> · <b>工作流开发（多节点拓扑）</b></td></tr>
 <tr><td><img src="docs/screenshots/10-ops.png?v=2" width="49%"/><img src="docs/screenshots/11-monitoring.png?v=2" width="49%"/></td></tr>
-<tr><td colspan="2"><b>调度运维（实例 / 日志 / 重跑 / 告警通道）</b> · <b>数据监控告警（7 类规则 / 趋势图 / 静默窗口）</b></td></tr>
+<tr><td colspan="2"><b>调度运维（实例 / 日志 / 重跑 / 运行矩阵 Grid / Airflow 调度引擎面板）</b> · <b>数据监控告警（7 类规则 / 趋势图 / 静默窗口 / 告警通道与记录统一收口）</b></td></tr>
 <tr><td><img src="docs/screenshots/12-apis.png?v=2" width="49%"/><img src="docs/screenshots/13-users.png?v=2" width="49%"/></td></tr>
 <tr><td colspan="2"><b>数据服务（SQL→API：AK/SK / 限流 / 审计 + 列级脱敏规则）</b> · <b>用户管理（RBAC 四角色）</b></td></tr>
 <tr><td><img src="docs/screenshots/14-audit.png?v=2" width="49%"/></td></tr>

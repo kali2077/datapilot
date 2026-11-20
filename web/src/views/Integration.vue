@@ -9,6 +9,7 @@
           <el-option label="已下线" value="offline" />
         </el-select>
         <div class="spacer" />
+        <el-checkbox v-if="!readonly" v-model="trialRealWrite" size="small">试跑真实写入</el-checkbox>
         <span v-if="readonly" class="muted">只读模式：查看集成任务与查询链路</span>
         <el-button icon="Refresh" circle @click="load" />
         <el-button icon="Collection" @click="openMappings">类型映射规则</el-button>
@@ -20,7 +21,11 @@
 
       <el-table v-loading="loading" :data="list" stripe>
         <el-table-column prop="name" label="任务名称" min-width="160">
-          <template #default="{ row }"><span style="font-weight: 600">{{ row.name }}</span></template>
+          <template #default="{ row }">
+            <el-link type="primary" :underline="false" @click="openDetail(row)">
+              <span style="font-weight: 600">{{ row.name }}</span>
+            </el-link>
+          </template>
         </el-table-column>
         <el-table-column label="源 → 目标" min-width="280">
           <template #default="{ row }">
@@ -36,6 +41,19 @@
         <el-table-column label="状态" width="100">
           <template #default="{ row }">
             <el-tag :type="statusTag(row.status)" size="small">{{ statusLabel(row.status) }}</el-tag>
+          </template>
+        </el-table-column>
+        <el-table-column label="最近运行" width="160">
+          <template #default="{ row }">
+            <span
+              v-if="row.last_run" class="run-cell" :class="{ failed: row.last_run.status === 'failed' }"
+              :title="row.last_run.error || ''"
+              @click="row.workflow_id && $router.push(`/ops?workflow_id=${row.workflow_id}`)"
+            >
+              <span class="dp-dot" :class="runDot(row.last_run.status)" />{{ runLabel(row.last_run.status) }}
+              <span class="muted tiny">{{ (row.last_run.finished_at || '').slice(5, 16) }}</span>
+            </span>
+            <span v-else class="muted">未运行</span>
           </template>
         </el-table-column>
         <el-table-column label="写入模式" width="120">
@@ -103,19 +121,71 @@
                 <el-option label="replace（整表替换）" value="replace" />
               </el-select>
             </el-form-item>
+            <el-form-item v-if="form.write_mode === 'append'" label="合并键">
+              <el-input v-model="form.upsert_keys" placeholder="可选，目标列名逗号分隔，如：id, dt" />
+              <div class="muted tiny">配置后同键数据合并而非追加（更新型表可增量）：MySQL=ON DUPLICATE KEY / PG=ON CONFLICT /
+                Doris·StarRocks=UNIQUE KEY 模型 / 其他=先删后插兜底</div>
+            </el-form-item>
           </el-col>
         </el-row>
         <el-divider style="margin: 4px 0 14px" />
         <el-row :gutter="16">
-          <el-col :span="8">
+          <el-col :span="6">
             <el-form-item label="增量同步">
               <el-switch v-model="form.increment_enabled" />
             </el-form-item>
           </el-col>
-          <el-col :span="10">
+          <el-col :span="8">
             <el-form-item label="增量列">
               <el-input v-model="form.increment_column" :disabled="!form.increment_enabled" placeholder="如：updated_at / id" />
             </el-form-item>
+          </el-col>
+          <el-col v-if="form.increment_enabled" :span="10">
+            <el-form-item label="增量模式">
+              <el-radio-group v-model="form.increment_mode">
+                <el-radio-button value="max_value">断点续传</el-radio-button>
+                <el-radio-button value="time_range">按表达式</el-radio-button>
+              </el-radio-group>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <div v-if="form.increment_enabled" class="muted tiny" style="margin: -10px 0 10px 100px">
+          <template v-if="form.increment_mode === 'max_value'">
+            断点续传：首次自动全量，之后只同步「增量列 &gt; 目标当前最大值」的数据（断点存目标表，重置目标表可重新全量）
+          </template>
+          <template v-else>
+            按表达式：每次只同步「增量列 ≥ 表达式解析值」的分区数据
+          </template>
+        </div>
+        <el-row v-if="form.increment_enabled && form.increment_mode === 'time_range'" :gutter="16">
+          <el-col :span="14">
+            <el-form-item label="时间表达式">
+              <el-input v-model="form.increment_expr" class="mono" placeholder="${bizdate} 或 ${bizdate_nodash}" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="10">
+            <el-form-item label=" ">
+              <el-button size="small" @click="resolveExpr">试算</el-button>
+              <el-tag v-if="incResolved" size="small" effect="plain" class="mono" style="margin-left: 8px">
+                {{ incResolved }}
+              </el-tag>
+            </el-form-item>
+          </el-col>
+        </el-row>
+        <el-row :gutter="16">
+          <el-col :span="8">
+            <el-form-item label="失败重试">
+              <el-input-number v-model="form.retries" :min="0" :max="5" style="width: 100%" />
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <el-form-item label="重试间隔">
+              <el-input-number v-model="form.retry_delay_minutes" :min="1" :max="60" style="width: 100%" />
+              <span class="muted tiny" style="margin-left: 8px">分钟</span>
+            </el-form-item>
+          </el-col>
+          <el-col :span="8">
+            <div class="muted tiny" style="padding-top: 30px">Airflow 模式下作为 DAG 重试策略下发；断点续传/清空重写均幂等，重试安全</div>
           </el-col>
         </el-row>
         <el-row :gutter="16">
@@ -159,9 +229,13 @@
     </el-dialog>
 
     <!-- 试跑结果 -->
-    <el-dialog v-model="trialDlg.visible" title="试跑结果（100 行）" width="820px" top="6vh">
+    <el-dialog v-model="trialDlg.visible" :title="`试跑结果（${trialDlg.dry ? '校验模式，未写目标' : '真实写入'} · 100 行）`" width="820px" top="6vh">
       <div v-if="trialDlg.loading" v-loading="true" style="height: 160px" />
       <template v-else>
+        <el-alert
+          v-if="trialDlg.dry" type="info" :closable="false" style="margin-bottom: 12px"
+          title="校验模式：只读源库验证列映射与 SQL，不写入目标表（不影响增量断点）；勾选「试跑真实写入」可验证完整写入链路"
+        />
         <el-descriptions :column="4" size="small" border style="margin-bottom: 12px">
           <el-descriptions-item label="读取行数">{{ trialDlg.stats?.read_rows ?? '-' }}</el-descriptions-item>
           <el-descriptions-item label="写入行数">{{ trialDlg.stats?.written_rows ?? '-' }}</el-descriptions-item>
@@ -203,6 +277,15 @@
 
     <!-- 版本抽屉 -->
     <el-drawer v-model="verDlg.visible" :title="`版本历史：${verDlg.job?.name || ''}`" size="560px">
+      <div v-if="verDlg.job" class="toolbar" style="margin-bottom: 10px">
+        <span class="muted tiny">目标：{{ verDlg.job.target?.name }}.{{ verDlg.job.target?.table }}</span>
+        <div class="spacer" />
+        <el-tooltip content="清空目标表数据（保留结构），下次同步重新全量、重建增量断点" placement="top">
+          <el-button v-if="!readonly" size="small" type="danger" plain icon="RefreshLeft" @click="resetTarget(verDlg.job)">
+            重置目标表
+          </el-button>
+        </el-tooltip>
+      </div>
       <el-table :data="verDlg.versions" size="small" v-loading="verDlg.loading">
         <el-table-column prop="version" label="版本" width="70">
           <template #default="{ row }">v{{ row.version }}</template>
@@ -227,6 +310,72 @@
         </div>
         <el-input :model-value="verDlg.datax" type="textarea" :rows="18" readonly class="mono" />
       </template>
+    </el-drawer>
+
+    <!-- 任务详情抽屉：基本信息 / 最近运行趋势 / 列映射 -->
+    <el-drawer v-model="dtl.visible" :title="`任务详情：${dtl.job?.name || ''}`" size="760px">
+      <template v-if="dtl.job">
+        <el-descriptions :column="2" size="small" border style="margin-bottom: 14px">
+          <el-descriptions-item label="状态">
+            <el-tag :type="statusTag(dtl.job.status)" size="small">{{ statusLabel(dtl.job.status) }}</el-tag>
+          </el-descriptions-item>
+          <el-descriptions-item label="版本">v{{ dtl.job.current_version }}</el-descriptions-item>
+          <el-descriptions-item label="写入模式">{{ writeModeLabel(dtl.job.config?.write_mode) }}</el-descriptions-item>
+          <el-descriptions-item label="合并键">
+            <span class="mono">{{ (dtl.job.config?.upsert_keys || []).join(', ') || '-' }}</span>
+          </el-descriptions-item>
+          <el-descriptions-item label="增量">
+            {{ dtl.job.config?.increment?.enabled
+              ? `${dtl.job.config.increment.column}（${dtl.job.config.increment.mode || 'max_value'}）` : '关' }}
+          </el-descriptions-item>
+          <el-descriptions-item label="更新时间">{{ dtl.job.updated_at }}</el-descriptions-item>
+        </el-descriptions>
+
+        <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 8px">
+          <span style="font-weight: 600">最近运行（写入行数趋势）</span>
+          <div class="spacer" />
+          <el-button size="small" type="warning" plain icon="Bell" @click="createHaltRule(dtl.job)">建断流监控</el-button>
+          <el-button
+            v-if="dtl.job.workflow_id" size="small" type="primary" plain icon="Grid"
+            @click="$router.push(`/ops?workflow_id=${dtl.job.workflow_id}`)"
+          >运行矩阵</el-button>
+        </div>
+        <div v-show="dtl.trend.length" ref="dtlTrendEl" style="width: 100%; height: 180px; margin-bottom: 10px" />
+        <el-empty v-if="!dtl.trend.length" description="暂无运行记录" :image-size="60" />
+        <el-table v-else :data="dtl.trend" size="small" border>
+          <el-table-column label="完成时间" width="165">
+            <template #default="{ row }">{{ row.finished_at || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="状态" width="95">
+            <template #default="{ row }">
+              <span class="dp-dot" :class="runDot(row.status)" /> {{ runLabel(row.status) }}
+            </template>
+          </el-table-column>
+          <el-table-column label="触发" width="85">
+            <template #default="{ row }">{{ row.trigger_type || '-' }}</template>
+          </el-table-column>
+          <el-table-column label="写入行数" width="100" align="right">
+            <template #default="{ row }">{{ row.rows_written >= 0 ? row.rows_written : '-' }}</template>
+          </el-table-column>
+          <el-table-column label="耗时" width="90" align="right">
+            <template #default="{ row }">{{ fmtDuration(row.duration_ms) }}</template>
+          </el-table-column>
+        </el-table>
+
+        <div class="cc-sub" style="margin-top: 14px">列映射（{{ dtl.job.config?.columns?.length || 0 }}）</div>
+        <el-table v-if="dtl.job.config?.columns?.length" :data="dtl.job.config.columns" size="small" border max-height="260">
+          <el-table-column prop="source" label="源列" min-width="130" class-name="mono" />
+          <el-table-column prop="target" label="目标列" min-width="130" class-name="mono" />
+          <el-table-column label="源类型" width="130">
+            <template #default="{ row }"><span class="mono muted">{{ row.source_type || '-' }}</span></template>
+          </el-table-column>
+          <el-table-column label="目标类型" width="130">
+            <template #default="{ row }"><span class="mono muted">{{ row.target_type || '-' }}</span></template>
+          </el-table-column>
+        </el-table>
+        <el-empty v-else description="尚未生成列映射（执行校验/试跑后自动读取）" :image-size="60" />
+      </template>
+      <div v-else v-loading="true" style="height: 300px" />
     </el-drawer>
 
     <!-- 类型映射规则（同步任务字段类型转换的覆盖规则；admin 可编辑） -->
@@ -348,13 +497,32 @@
     </el-dialog>
 
     <!-- 数据比对 -->
-    <el-dialog v-model="cmpDlg.visible" :title="`数据比对：${cmpDlg.jobName}`" width="640px">
+    <el-dialog v-model="cmpDlg.visible" :title="`数据比对：${cmpDlg.jobName}`" width="680px">
+      <div class="toolbar" style="margin-bottom: 10px">
+        <el-radio-group v-model="cmpDlg.mode" size="small" @change="runCompare">
+          <el-radio-button value="sample">抽样比对</el-radio-button>
+          <el-radio-button value="chunk">分块全量校验</el-radio-button>
+        </el-radio-group>
+        <span class="muted tiny">分块：按合并键/增量列切 10 段逐段计数（键列需数值型），定位差异区间</span>
+      </div>
       <template v-if="cmpDlg.report">
         <el-descriptions :column="3" size="small" border>
           <el-descriptions-item label="源行数">{{ cmpDlg.report.source.rows }}</el-descriptions-item>
           <el-descriptions-item label="目标行数">{{ cmpDlg.report.target.rows }}</el-descriptions-item>
           <el-descriptions-item label="行数差">{{ cmpDlg.report.row_diff }}</el-descriptions-item>
         </el-descriptions>
+        <el-alert
+          v-if="cmpDlg.report.mode === 'chunk'" style="margin: 12px 0" :closable="false"
+          :type="cmpDlg.report.chunk_diffs?.length ? 'error' : 'success'" show-icon
+          :title="cmpDlg.report.chunk_diffs?.length
+            ? `分块校验：${cmpDlg.report.chunks_ok}/${cmpDlg.report.chunks_total} 块一致，${cmpDlg.report.chunk_diffs.length} 块存在差异（键：${cmpDlg.report.chunk_key}）`
+            : `分块校验：${cmpDlg.report.chunks_total} 块全部一致（键：${cmpDlg.report.chunk_key}）`"
+        />
+        <el-table v-if="cmpDlg.report.chunk_diffs?.length" :data="cmpDlg.report.chunk_diffs" size="small" border style="margin-bottom: 12px">
+          <el-table-column prop="range" label="键区间" min-width="140" class-name="mono" />
+          <el-table-column prop="source" label="源行数" width="100" align="right" />
+          <el-table-column prop="target" label="目标行数" width="100" align="right" />
+        </el-table>
         <el-alert
           :type="cmpDlg.report.consistent ? 'success' : 'warning'" show-icon :closable="false"
           :title="cmpDlg.report.consistent ? '源目一致' : '存在差异'"
@@ -433,12 +601,14 @@
 </template>
 
 <script setup>
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, nextTick, onMounted, reactive, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import http, { errMsg } from '../api'
+import * as echarts from 'echarts'
+import http, { errMsg, fmtDuration } from '../api'
 import { openAi } from '../ai'
 import { useAuthStore } from '../store'
+import { dpAlpha, dpAxisLabel, dpColor, dpSplitLine, dpTooltip } from '../charts/theme'
 
 const route = useRoute()
 const auth = useAuthStore()
@@ -458,7 +628,90 @@ const bulkDlg = reactive({ visible: false, saving: false })
 const bulkForm = reactive({ source_datasource_id: null, target_datasource_id: null,
                             tables: [], write_mode: 'append', cron: '', publish: true })
 const bulkResult = ref(null)
-const cmpDlg = reactive({ visible: false, jobName: '', report: null })
+const cmpDlg = reactive({ visible: false, jobName: '', jobId: null, report: null, mode: 'sample' })
+
+async function compareJob(row) {
+  cmpDlg.jobName = row.name
+  cmpDlg.jobId = row.id
+  cmpDlg.mode = 'sample'
+  cmpDlg.report = null
+  cmpDlg.visible = true
+  await doCompare()
+}
+
+async function doCompare() {
+  try {
+    cmpDlg.report = await http.post(`/api/integ/jobs/${cmpDlg.jobId}/compare`, {},
+                                    { params: { mode: cmpDlg.mode } })
+  } catch (e) {
+    cmpDlg.visible = false
+    ElMessage.error(errMsg(e))
+  }
+}
+
+/* ---------- 任务详情抽屉（基本信息 / 最近运行趋势 / 列映射） ---------- */
+const dtl = reactive({ visible: false, job: null, trend: [], loading: false })
+const dtlTrendEl = ref(null)
+let dtlChart = null
+
+async function openDetail(row) {
+  dtl.job = row
+  dtl.trend = []
+  dtl.visible = true
+  if (!row.workflow_id) return
+  try {
+    const res = await http.get(`/api/integ/jobs/${row.id}/trend`, { params: { limit: 12 } })
+    dtl.trend = res.items || []
+    nextTick(() => renderDtlTrend())
+  } catch { /* ignore */ }
+}
+
+function renderDtlTrend() {
+  if (!dtlTrendEl.value) return
+  if (!dtlChart) dtlChart = echarts.init(dtlTrendEl.value)
+  dtlChart.setOption({
+    grid: { left: 56, right: 16, top: 22, bottom: 24 },
+    tooltip: { ...dpTooltip(), trigger: 'axis' },
+    xAxis: {
+      type: 'category',
+      data: dtl.trend.map((t) => (t.finished_at || '').slice(5, 16)),
+      axisLabel: dpAxisLabel(), axisLine: { lineStyle: { color: dpColor('border') } },
+    },
+    yAxis: { type: 'value', axisLabel: dpAxisLabel(), splitLine: dpSplitLine() },
+    series: [{
+      name: '写入行数', type: 'line',
+      data: dtl.trend.map((t) => (t.rows_written >= 0 ? t.rows_written : null)),
+      connectNulls: false, symbol: 'circle', symbolSize: 5,
+      lineStyle: { width: 1.5 }, itemStyle: { color: dpColor('accent') },
+      areaStyle: { color: dpAlpha('accent', 0.1) },
+    }],
+  }, true)
+  dtlChart.resize()
+}
+
+async function createHaltRule(job) {
+  try {
+    await ElMessageBox.confirm(
+      `创建同步断流监控：每日检查「${job.name}」最近一次成功实例的写入行数（阈值 1 行），` +
+      '低于阈值即经告警通道通知。可在监控告警页调整阈值/调度。', '建断流监控',
+      { type: 'info', confirmButtonText: '创建' })
+  } catch { return }
+  try {
+    await http.post('/api/monitor/rules', {
+      name: `${job.name.slice(0, 120)}-断流监控`, rule_type: 'sync_halt',
+      datasource_id: 0, table_name: '', column_name: '',
+      params: { workflow_name: job.name, min_rows: 1 },
+      cron: '0 7 * * *', severity: 'warning', enabled: true, group_name: '', mute_hours: 24,
+    })
+    ElMessage.success('断流监控已创建（监控告警页可调整阈值与调度）')
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  }
+}
+
+onBeforeUnmount(() => {
+  if (dtlChart) { dtlChart.dispose(); dtlChart = null }
+})
 
 async function openBulk() {
   if (!dsListAll.value.length) {
@@ -546,18 +799,6 @@ async function runBulk() {
   }
 }
 
-async function compareJob(row) {
-  cmpDlg.jobName = row.name
-  cmpDlg.report = null
-  cmpDlg.visible = true
-  try {
-    cmpDlg.report = await http.post(`/api/integ/jobs/${row.id}/compare`, {})
-  } catch (e) {
-    cmpDlg.visible = false
-    ElMessage.error(errMsg(e))
-  }
-}
-
 // ---- 类型映射规则 ----
 const mapDlg = reactive({ visible: false })
 const mapLoading = ref(false)
@@ -630,12 +871,25 @@ const saving = ref(false)
 const dlg = reactive({ visible: false, isEdit: false, id: null })
 const form = reactive({
   name: '', source_datasource_id: null, source_table: '', source_query: '',
-  target_datasource_id: null, target_table: '', write_mode: 'append',
-  increment_enabled: false, increment_column: '', pre_sql: '', post_sql: '',
+  target_datasource_id: null, target_table: '', write_mode: 'append', upsert_keys: '',
+  increment_enabled: false, increment_column: '', increment_mode: 'max_value',
+  increment_expr: '', retries: 0, retry_delay_minutes: 5, pre_sql: '', post_sql: '',
 })
+const incResolved = ref('')
+
+async function resolveExpr() {
+  try {
+    const res = await http.post('/api/integ/increment/resolve', null,
+                               { params: { expr: form.increment_expr || '' } })
+    incResolved.value = res.resolved || '(无占位符，按原文使用)'
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  }
+}
 
 const valDlg = reactive({ visible: false, loading: false, ok: true, issues: [], ddl: '' })
-const trialDlg = reactive({ visible: false, loading: false, stats: null, columns: [], rows: [] })
+const trialDlg = reactive({ visible: false, loading: false, stats: null, columns: [], rows: [], dry: true })
+const trialRealWrite = ref(false)
 const pubDlg = reactive({ visible: false, id: null, cron: '0 2 * * *', depends_on: [], saving: false })
 const verDlg = reactive({ visible: false, job: null, versions: [], loading: false, datax: '', dataxVersion: null })
 
@@ -649,6 +903,25 @@ function statusTag(s) {
 }
 function statusLabel(s) {
   return { draft: '草稿', published: '已发布', offline: '已下线' }[s] || s
+}
+function runDot(s) {
+  return { success: 'ok', failed: 'danger', running: 'run', waiting: 'idle' }[s] || 'idle'
+}
+function runLabel(s) {
+  return { success: '成功', failed: '失败', running: '运行中', waiting: '等待' }[s] || (s || '-')
+}
+async function resetTarget(job) {
+  try {
+    await ElMessageBox.confirm(
+      `清空目标表「${job.target?.table}」数据（保留表结构），下次同步将重新全量、重建增量断点。确定？`,
+      '重置确认', { type: 'warning', confirmButtonText: '重置' })
+  } catch { return }
+  try {
+    const res = await http.post(`/api/integ/jobs/${job.id}/reset_target`)
+    ElMessage.success(`目标表已重置（${res.mode}），下次同步将全量执行`)
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  }
 }
 function writeModeLabel(m) {
   return { append: 'append 追加', truncate_insert: 'truncate 插入', replace: 'replace 替换' }[m] || m || '-'
@@ -675,9 +948,11 @@ async function loadRefs() {
 function resetForm() {
   Object.assign(form, {
     name: '', source_datasource_id: null, source_table: '', source_query: '',
-    target_datasource_id: null, target_table: '', write_mode: 'append',
-    increment_enabled: false, increment_column: '', pre_sql: '', post_sql: '',
+    target_datasource_id: null, target_table: '', write_mode: 'append', upsert_keys: '',
+    increment_enabled: false, increment_column: '', increment_mode: 'max_value',
+    increment_expr: '', retries: 0, retry_delay_minutes: 5, pre_sql: '', post_sql: '',
   })
+  incResolved.value = ''
 }
 
 function openCreate() {
@@ -698,8 +973,13 @@ function openEdit(row) {
     target_datasource_id: row.target?.id || null,
     target_table: row.target?.table || '',
     write_mode: row.config?.write_mode || 'append',
+    upsert_keys: (row.config?.upsert_keys || []).join(', '),
     increment_enabled: !!row.config?.increment?.enabled,
     increment_column: row.config?.increment?.column || '',
+    increment_mode: row.config?.increment?.mode || 'max_value',
+    increment_expr: row.config?.increment?.expr || '',
+    retries: row.config?.retries ?? 0,
+    retry_delay_minutes: row.config?.retry_delay_minutes ?? 5,
     pre_sql: row.config?.pre_sql || '',
     post_sql: row.config?.post_sql || '',
   })
@@ -720,7 +1000,15 @@ function buildPayload() {
     target_table: form.target_table.trim(),
     config: {
       write_mode: form.write_mode,
-      increment: { enabled: form.increment_enabled, column: form.increment_column.trim() },
+      upsert_keys: form.upsert_keys.split(/[,，\s]+/).map((s) => s.trim()).filter(Boolean),
+      increment: {
+        enabled: form.increment_enabled,
+        column: form.increment_column.trim(),
+        mode: form.increment_mode || 'max_value',
+        expr: form.increment_mode === 'time_range' ? form.increment_expr.trim() : '',
+      },
+      retries: form.retries || 0,
+      retry_delay_minutes: form.retry_delay_minutes || 5,
       pre_sql: form.pre_sql.trim(),
       post_sql: form.post_sql.trim(),
     },
@@ -767,13 +1055,22 @@ async function validate(row) {
 }
 
 async function trial(row) {
+  if (trialRealWrite.value) {
+    try {
+      await ElMessageBox.confirm(
+        '真实写入模式：样本数据会写入目标表（影响 max_value 增量断点）。确定继续？', '试跑确认',
+        { type: 'warning', confirmButtonText: '真实写入' })
+    } catch { return }
+  }
   trialDlg.visible = true
   trialDlg.loading = true
   trialDlg.stats = null
   trialDlg.columns = []
   trialDlg.rows = []
+  trialDlg.dry = !trialRealWrite.value
   try {
-    const res = await http.post(`/api/integ/jobs/${row.id}/trial`)
+    const res = await http.post(`/api/integ/jobs/${row.id}/trial`, null,
+                                { params: { dry_run: !trialRealWrite.value } })
     trialDlg.stats = res.stats
     trialDlg.columns = res.columns || []
     trialDlg.rows = res.rows || []
@@ -889,5 +1186,18 @@ onMounted(() => {
 <style scoped>
 .col-head {
   margin: 0 0 10px 90px;
+}
+.run-cell {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.run-cell.failed {
+  color: var(--dp-danger);
+}
+.run-cell:hover {
+  text-decoration: underline;
 }
 </style>

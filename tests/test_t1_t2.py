@@ -114,7 +114,7 @@ def test_mask_rules_on_query_and_sync_unaffected(client, tokens):
         "name": "mask_sync", "source_datasource_id": src["id"], "source_table": "orders",
         "target_datasource_id": dst["id"], "target_table": "ods_mask", "config": {}}).json()
     client.post(f"/api/integ/jobs/{job['id']}/validate", headers=h)
-    r = client.post(f"/api/integ/jobs/{job['id']}/trial", headers=h)
+    r = client.post(f"/api/integ/jobs/{job['id']}/trial", headers=h, params={"dry_run": "false"})
     assert r.json()["stats"]["written_rows"] == 10
     # 规则删除
     mid = client.get("/api/mask/rules", headers=h).json()[0]["id"]

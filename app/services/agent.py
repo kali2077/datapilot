@@ -224,8 +224,10 @@ def t_create_sync_job(db: Session, user, session_id: int, source_datasource="",
         if not ok:
             return {"summary": msg, "error": True}
     token = _secrets.token_hex(16)
-    desc = (f"已创建草稿任务 [{name}] 并试跑 100 行成功（{trial['stats']['written_rows']} 行，"
-            f"{trial['stats']['duration_ms']}ms）。目标表{'已自动建表' if trial['stats']['auto_created'] else '已存在'}。")
+    st = trial["stats"]
+    desc = (f"已创建草稿任务 [{name}] 并试跑校验成功（读取 {st.get('read_rows', 0)} 行，"
+            f"{st.get('duration_ms', 0)}ms，校验模式未写目标表）。"
+            f"目标表{'已自动建表' if st.get('auto_created') else '已存在'}。")
     if cron:
         desc += f"确认后将注册调度：{cron}。"
     else:

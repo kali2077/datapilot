@@ -29,7 +29,7 @@
         <!-- ============ 监控规则 ============ -->
         <el-tab-pane label="监控规则" name="rules">
           <div class="toolbar">
-            <span class="muted">数据质量 / 任务健康定时巡检，失败经告警通道通知（通道在调度运维-告警通道配置）</span>
+            <span class="muted">数据质量 / 任务健康 / 资产巡检定时检查，失败经告警通道通知（通道在「告警通道」页签配置）</span>
             <div class="spacer" />
             <el-select v-model="groupFilter" placeholder="全部分组" clearable style="width: 150px">
               <el-option v-for="g in groups" :key="g" :label="g" :value="g" />
@@ -54,7 +54,8 @@
             <el-table-column label="监控对象" min-width="180">
               <template #default="{ row }">
                 <span class="mono tiny">
-                  {{ row.rule_type === 'task_duration' ? ('工作流 ' + (row.params?.workflow_name || '-'))
+                  {{ ['task_duration', 'sync_halt'].includes(row.rule_type)
+                     ? ('工作流 ' + (row.params?.workflow_name || '-') + (row.rule_type === 'sync_halt' ? ` · ≥${row.params?.min_rows ?? 1} 行` : ''))
                      : ((row.datasource || '-') + ' · ' + row.table_name + (row.column_name ? '.' + row.column_name : '')) }}
                 </span>
               </template>
@@ -155,6 +156,69 @@
           <div v-if="host" class="muted tiny" style="margin-top: 8px">主机启动时间: {{ host.boot_time }}</div>
           <el-empty v-else description="加载中" :image-size="60" />
         </el-tab-pane>
+
+        <!-- ============ 告警通道 ============ -->
+        <el-tab-pane label="告警通道" name="channels">
+          <div class="toolbar">
+            <span class="muted">任务失败 / 监控规则 / 资产变更巡检 的通知渠道（管理员维护）</span>
+            <div class="spacer" />
+            <el-button v-if="auth.isAdmin" type="primary" icon="Plus" @click="openChannel()">新建通道</el-button>
+          </div>
+          <el-table v-loading="chLoading" :data="channels" stripe>
+            <el-table-column prop="name" label="名称" min-width="160" />
+            <el-table-column label="类型" width="100">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.type === 'email' ? 'primary' : 'warning'">{{ row.type }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column label="配置" min-width="300" show-overflow-tooltip>
+              <template #default="{ row }">
+                <span class="mono muted">{{ channelSummary(row) }}</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="启用" width="80">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.enabled ? 'success' : 'info'">{{ row.enabled ? '是' : '否' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column v-if="auth.isAdmin" label="操作" width="140" fixed="right">
+              <template #default="{ row }">
+                <el-button link type="primary" @click="openChannel(row)">编辑</el-button>
+                <el-button link type="danger" @click="removeChannel(row)">删除</el-button>
+              </template>
+            </el-table-column>
+            <template #empty><el-empty description="暂无告警通道" /></template>
+          </el-table>
+        </el-tab-pane>
+
+        <!-- ============ 告警记录 ============ -->
+        <el-tab-pane label="告警记录" name="records">
+          <div class="toolbar">
+            <span class="muted">任务失败、规则异常、资产危险变更 的全部通知流水</span>
+            <div class="spacer" />
+            <span class="muted">共 {{ recTotal }} 条</span>
+            <el-button icon="Refresh" circle @click="loadRecords" />
+          </div>
+          <el-table v-loading="recLoading" :data="records" stripe>
+            <el-table-column prop="id" label="#" width="64" />
+            <el-table-column prop="channel" label="通道" width="140" />
+            <el-table-column prop="title" label="告警内容" min-width="330" show-overflow-tooltip />
+            <el-table-column label="关联" width="90">
+              <template #default="{ row }">
+                <el-link v-if="row.instance_id" type="primary"
+                         @click.stop="$router.push(`/ops?instance_id=${row.instance_id}`)">#{{ row.instance_id }}</el-link>
+                <span v-else class="muted">-</span>
+              </template>
+            </el-table-column>
+            <el-table-column label="状态" width="90">
+              <template #default="{ row }">
+                <el-tag size="small" :type="row.status === 'ok' ? 'success' : 'danger'">{{ row.status || '-' }}</el-tag>
+              </template>
+            </el-table-column>
+            <el-table-column prop="ts" label="时间" width="170" />
+            <template #empty><el-empty description="暂无告警记录" /></template>
+          </el-table>
+        </el-tab-pane>
       </el-tabs>
     </div>
 
@@ -170,7 +234,7 @@
           </el-select>
         </el-form-item>
 
-        <template v-if="form.rule_type !== 'task_duration'">
+        <template v-if="!['task_duration', 'sync_halt'].includes(form.rule_type)">
           <el-form-item label="数据源" required>
             <el-select v-model="form.datasource_id" filterable style="width: 100%" @change="onDsChange">
               <el-option v-for="d in datasources" :key="d.id" :label="`${d.name} (${d.type})`" :value="d.id" />
@@ -213,6 +277,10 @@
         </el-form-item>
         <el-form-item v-if="form.rule_type === 'task_duration'" label="时长阈值(分)">
           <el-input-number v-model="form.params.max_minutes" :min="0.5" :step="0.5" />
+        </el-form-item>
+        <el-form-item v-if="form.rule_type === 'sync_halt'" label="行数阈值">
+          <el-input-number v-model="form.params.min_rows" :min="1" />
+          <span class="muted tiny" style="margin-left: 8px">最近一次成功实例写入行数低于该值即告警（源端断流/上游断供）</span>
         </el-form-item>
         <el-form-item v-if="form.rule_type === 'sql_check'" label="校验 SQL" required>
           <el-input v-model="form.params.sql" type="textarea" :rows="4" class="mono"
@@ -259,6 +327,37 @@
         <el-button type="primary" :loading="dlg.saving" @click="save">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 告警通道对话框 -->
+    <el-dialog v-model="chDlg.visible" :title="chDlg.isEdit ? '编辑告警通道' : '新建告警通道'" width="520px" destroy-on-close>
+      <el-form :model="chDlg.form" label-width="90px">
+        <el-form-item label="名称" required><el-input v-model="chDlg.form.name" /></el-form-item>
+        <el-form-item label="类型" required>
+          <el-radio-group v-model="chDlg.form.type">
+            <el-radio-button value="email">Email</el-radio-button>
+            <el-radio-button value="webhook">Webhook</el-radio-button>
+          </el-radio-group>
+        </el-form-item>
+        <template v-if="chDlg.form.type === 'email'">
+          <el-form-item label="收件人" required>
+            <el-input v-model="chDlg.form.config.to" placeholder="a@x.com, b@x.com" />
+          </el-form-item>
+          <el-form-item label="SMTP 主机" required><el-input v-model="chDlg.form.config.smtp_host" /></el-form-item>
+          <el-form-item label="SMTP 端口"><el-input-number v-model="chDlg.form.config.smtp_port" :min="1" :max="65535" /></el-form-item>
+          <el-form-item label="用户名"><el-input v-model="chDlg.form.config.username" /></el-form-item>
+          <el-form-item label="密码/授权码"><el-input v-model="chDlg.form.config.password" type="password" show-password /></el-form-item>
+        </template>
+        <template v-else>
+          <el-form-item label="URL" required><el-input v-model="chDlg.form.config.url" placeholder="https://..." /></el-form-item>
+          <el-form-item label="Secret"><el-input v-model="chDlg.form.config.secret" placeholder="可选，用于签名" /></el-form-item>
+        </template>
+        <el-form-item label="启用"><el-switch v-model="chDlg.form.enabled" /></el-form-item>
+      </el-form>
+      <template #footer>
+        <el-button @click="chDlg.visible = false">取消</el-button>
+        <el-button type="primary" :loading="chDlg.saving" @click="saveChannel">保存</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -269,9 +368,11 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import * as echarts from 'echarts'
 import http, { errMsg } from '../api'
 import { openAi } from '../ai'
+import { useAuthStore } from '../store'
 import { dpAlpha, dpAxisLabel, dpColor, dpLegend, dpSplitLine, dpTooltip, onThemeChange } from '../charts/theme'
 
 const route = useRoute()
+const auth = useAuthStore()
 const tab = ref('rules')
 const loading = ref(false)
 const rules = ref([])
@@ -288,6 +389,7 @@ const TYPE_MAP = {
   freshness: '数据延迟',
   sql_check: '自定义SQL',
   task_duration: '任务时长',
+  sync_halt: '同步断流',
 }
 const typeOptions = Object.entries(TYPE_MAP).map(([v, l]) => ({ v, l }))
 const typeLabel = (t) => TYPE_MAP[t] || t
@@ -383,6 +485,7 @@ function blankParams(t) {
     freshness: { hours: 24 },
     sql_check: { sql: '' },
     task_duration: { workflow_name: '', max_minutes: 30 },
+    sync_halt: { workflow_name: '', min_rows: 1 },
   }[t] || {}
 }
 
@@ -420,9 +523,111 @@ function onTab() {
   if (tab.value === 'checks') {
     loadChecks()
     setTimeout(() => { trendChart && trendChart.resize() }, 100)
-  } else loadRules()
-  if (tab.value === 'host') { loadHost(); watchHost() }
-  else clearInterval(hostTimer)
+  } else if (tab.value === 'host') { loadRules(); loadHost(); watchHost() }
+  else if (tab.value === 'channels') loadChannels()
+  else if (tab.value === 'records') loadRecords()
+  else loadRules()
+  if (tab.value !== 'host') clearInterval(hostTimer)
+}
+
+/* ---------- 告警通道 / 告警记录（任务失败 + 规则异常 + 资产巡检统一收口） ---------- */
+const channels = ref([])
+const chLoading = ref(false)
+const chDlg = reactive({
+  visible: false, isEdit: false, id: null, saving: false,
+  form: { name: '', type: 'email', enabled: true, config: {} },
+})
+const records = ref([])
+const recTotal = ref(0)
+const recLoading = ref(false)
+
+function channelSummary(row) {
+  const c = row.config || {}
+  if (row.type === 'email') return `to: ${c.to || '-'} | smtp: ${c.smtp_host || '-'}:${c.smtp_port || '-'}`
+  return `url: ${c.url || '-'}`
+}
+
+async function loadChannels() {
+  chLoading.value = true
+  try {
+    channels.value = await http.get('/api/sched/alert-channels')
+  } catch { /* ignore */ } finally {
+    chLoading.value = false
+  }
+}
+
+function openChannel(row) {
+  chDlg.isEdit = !!row
+  chDlg.id = row?.id || null
+  chDlg.form = {
+    name: row?.name || '',
+    type: row?.type || 'email',
+    enabled: row ? !!row.enabled : true,
+    config: row ? { ...(row.config || {}) } : { to: '', smtp_host: '', smtp_port: 465, username: '', password: '', url: '', secret: '' },
+  }
+  chDlg.visible = true
+}
+
+async function saveChannel() {
+  const f = chDlg.form
+  if (!f.name.trim()) {
+    ElMessage.warning('请填写通道名称')
+    return
+  }
+  const config = {}
+  if (f.type === 'email') {
+    if (!f.config.to?.trim() || !f.config.smtp_host?.trim()) {
+      ElMessage.warning('请填写收件人与 SMTP 主机')
+      return
+    }
+    Object.assign(config, {
+      to: f.config.to, smtp_host: f.config.smtp_host,
+      smtp_port: f.config.smtp_port || 465, username: f.config.username || '', password: f.config.password || '',
+    })
+  } else {
+    if (!f.config.url?.trim()) {
+      ElMessage.warning('请填写 Webhook URL')
+      return
+    }
+    Object.assign(config, { url: f.config.url, secret: f.config.secret || '' })
+  }
+  chDlg.saving = true
+  try {
+    const payload = { name: f.name.trim(), type: f.type, config, enabled: f.enabled }
+    if (chDlg.isEdit) await http.put(`/api/sched/alert-channels/${chDlg.id}`, payload)
+    else await http.post('/api/sched/alert-channels', payload)
+    ElMessage.success('已保存')
+    chDlg.visible = false
+    loadChannels()
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  } finally {
+    chDlg.saving = false
+  }
+}
+
+async function removeChannel(row) {
+  try {
+    await ElMessageBox.confirm(`删除告警通道「${row.name}」？删除后相关告警不再发送。`, '确认', { type: 'warning' })
+  } catch { return }
+  try {
+    await http.delete(`/api/sched/alert-channels/${row.id}`)
+    ElMessage.success('已删除')
+    loadChannels()
+  } catch (e) {
+    ElMessage.error(errMsg(e))
+  }
+}
+
+async function loadRecords() {
+  recLoading.value = true
+  try {
+    const res = await http.get('/api/sched/alert-records', { params: { page: 1, size: 50 } })
+    records.value = res.items
+    recTotal.value = res.total
+  } catch { /* ignore */ } finally {
+    recLoading.value = false
+  }
 }
 
 async function openDlg(row) {
@@ -477,9 +682,9 @@ async function save() {
   try {
     const payload = {
       name: form.name, rule_type: form.rule_type,
-      datasource_id: form.rule_type === 'task_duration' ? 0 : (form.datasource_id || 0),
-      table_name: form.rule_type === 'task_duration' ? '' : form.table_name,
-      column_name: form.rule_type === 'task_duration' ? '' : form.column_name,
+      datasource_id: ['task_duration', 'sync_halt'].includes(form.rule_type) ? 0 : (form.datasource_id || 0),
+      table_name: ['task_duration', 'sync_halt'].includes(form.rule_type) ? '' : form.table_name,
+      column_name: ['task_duration', 'sync_halt'].includes(form.rule_type) ? '' : form.column_name,
       params: form.params, cron: form.cron, severity: form.severity, enabled: form.enabled,
       group_name: form.group_name || '', mute_hours: form.mute_hours ?? 24,
     }

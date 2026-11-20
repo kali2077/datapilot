@@ -49,7 +49,7 @@ docker compose up -d        # MySQL + Doris(FE/BE) + Airflow + DataX + app + ngi
 
 1. `docker compose ps` 全部 Up（doris-be 首次注册 FE 需 1-2 分钟，`docker logs datapilot-doris-be` 观察）
 2. Doris：`mysql -h127.0.0.1 -P9030 -uroot` → `SHOW FRONTENDS\G` 确认 FE Alive
-3. Airflow：浏览器 8080 登录（账号见 compose 环境变量）→ 把 `deploy/airflow/factory_dag.py` 放入 dags 目录（compose 已自动拷贝）→ 平台侧设 `SCHEDULER_ENGINE=airflow` + `AIRFLOW_TOKEN`
+3. Airflow（3.x）：浏览器 8080 登录（默认 admin / `AIRFLOW_PASSWORD`）→ compose 已自动拷贝 `factory_dag.py` 并签发 API token 到共享 dags 卷 → 平台侧设 `SCHEDULER_ENGINE=airflow`（token 三级取用见 3.3 表格，通常无需手工配置）
 4. 平台：浏览器 80 → 用 admin 登录 → 数据源页接入业务库 → 采集元数据 → 试跑首个同步任务
 
 ### 3.3 环境变量全表（app 服务 / 裸跑均适用）
@@ -61,15 +61,16 @@ docker compose up -d        # MySQL + Doris(FE/BE) + Airflow + DataX + app + ngi
 | `FERNET_KEY` | 自动生成到 deploy/data/.fernet_key | 凭据加密密钥，**丢失=已存密码全部失效**，务必备份 |
 | `JWT_EXPIRE_MINUTES` | 720 | 登录有效期（分钟） |
 | `SCHEDULER_ENGINE` | `local` | `airflow`=接 Airflow 编排 |
-| `AIRFLOW_URL` / `AIRFLOW_TOKEN` / `AIRFLOW_DAGS_DIR` | — | Airflow 适配器三件套（factory DAG 配置目录） |
+| `AIRFLOW_URL` / `AIRFLOW_DAGS_DIR` | `http://localhost:8080` / 空 | Airflow 地址 + factory DAG 配置目录（airflow 模式必填） |
+| `AIRFLOW_TOKEN` / `AIRFLOW_TOKEN_FILE` / `AIRFLOW_USER`+`AIRFLOW_PASSWORD` | 空 | Airflow 3 JWT 三级取用（优先级从左到右）：直填 token > 共享卷 token 文件（compose 自动签发）> 账密自动调 `/auth/token` 换 token 并缓存 |
 | `DATAX_HOME` | 空（内置执行器） | 设为 DataX 目录后任务版本页渲染 JSON 可真实执行 |
 | `AI_BASE_URL` / `AI_API_KEY` / `AI_MODEL` | 空（规则引擎兜底） | OpenAI 兼容接口，DeepSeek/Qwen 均可 |
 | `AI_EMBED_BASE_URL` / `AI_EMBED_MODEL` | 空（词元匹配降级） | 向量检索 RAG（docs/design/09）：配置后启用语义检索，BASE_URL 默认复用 AI_BASE_URL，key 复用 AI_API_KEY；不配置行为不变 |
-| `META_COLLECT_HOURS` | 24 | 元数据定时采集间隔（小时），0=关闭 |
+| `META_COLLECT_HOURS` | 24 | 元数据定时采集间隔（小时），0=关闭；采集同时自动做资产变更巡检（表增删/schema drift/行数变化），危险变更经告警通道通知；任意调度引擎模式下均生效 |
 | `QUERY_TIMEOUT_S` / `QUERY_MAX_ROWS` | 30 / 1000 | 查询熔断与行数上限 |
 | `SMTP_HOST` / `SMTP_PORT` | — | 告警邮件发件默认值（可在告警通道逐条覆盖） |
 
-部署 compose 内另有：`MYSQL_ROOT_PASSWORD`/`MYSQL_PASSWORD`、`AIRFLOW_SECRET`/`AIRFLOW_PASSWORD`、`AIRFLOW_TOKEN`。
+部署 compose 内另有：`MYSQL_ROOT_PASSWORD`/`MYSQL_PASSWORD`、`AIRFLOW_IMAGE_TAG`（默认 3.4.0）、`AIRFLOW_SECRET`/`AIRFLOW_PASSWORD`、`AIRFLOW_TOKEN`、`DATAPILOT_TOKEN`（factory DAG 节点级回调平台时携带的平台 JWT；airflow 模式必配，须 engineer 及以上角色签发，可从平台 admin 登录后的 localStorage `dp_token` 复制；**JWT 默认 12h 过期**，生产建议同步调大 app 的 `JWT_EXPIRE_MINUTES` 防回调中断）。
 
 ## 四、11 种数据源接入参数对照
 
@@ -91,9 +92,14 @@ docker compose up -d        # MySQL + Doris(FE/BE) + Airflow + DataX + app + ngi
 ## 五、调度引擎切换
 
 - 默认 `local`（APScheduler 内置，单机即用；含元数据定时采集 + 等待轮询 + 监控巡检）
-- 切 Airflow：`SCHEDULER_ENGINE=airflow` + `AIRFLOW_URL/TOKEN` + `AIRFLOW_DAGS_DIR=/opt/airflow/dags`
+- 切 Airflow（3.x，注意 `/api/v1` 已移除、认证为 JWT）：
+  `SCHEDULER_ENGINE=airflow` + `AIRFLOW_URL` + `AIRFLOW_DAGS_DIR=/opt/airflow/dags`
   → 平台自动渲染 `workflows/wf_<id>.json`，由 `deploy/airflow/factory_dag.py` 动态生成 DAG；
-  Airflow 侧仅编排，任务执行仍回调平台 API（需平台可达 token）
+  **节点级回调**：Airflow 每个任务对应平台一个节点（`POST /api/sched/airflow/run` 幂等映射实例），
+  Airflow Grid 与平台「调度运维 → 运行矩阵」逐格一致，任务执行与日志/血缘仍在平台侧；
+  airflow 容器通过 `DATAPILOT_API`/`DATAPILOT_TOKEN` 回调平台（须配平台 JWT）；
+  平台调 Airflow 走 `/api/v2`（暂停/恢复、引擎面板的 DAG 列表与运行历史），
+  token 取用优先级 `AIRFLOW_TOKEN` > `AIRFLOW_TOKEN_FILE`（共享卷自动签发）> `AIRFLOW_USER/PASSWORD` 自动换 token
 
 ## 六、备份与恢复
 

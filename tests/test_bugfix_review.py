@@ -97,7 +97,7 @@ def test_pre_sql_executed(client, tokens):
                    "post_sql": "INSERT INTO pre_marker VALUES (datetime('now'))"}})
     job_id = r.json()["id"]
     client.post(f"/api/integ/jobs/{job_id}/validate", headers=h)
-    r = client.post(f"/api/integ/jobs/{job_id}/trial", headers=h)
+    r = client.post(f"/api/integ/jobs/{job_id}/trial", headers=h, params={"dry_run": "false"})
     assert r.status_code == 200, r.text
     # post_sql 生效：marker 表有记录
     from app.db import SessionLocal
