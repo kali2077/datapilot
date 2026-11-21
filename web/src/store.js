@@ -45,7 +45,6 @@ export const MENU = [
   {
     title: '智能应用',
     items: [
-      { path: '/ai-assistant', label: 'AI 助手', icon: 'MagicStick', roles: ['admin', 'engineer', 'analyst', 'viewer'] },
       { path: '/chat', label: '智能问数', icon: 'ChatDotRound', roles: ['admin', 'engineer', 'analyst', 'viewer'],
         children: [
           { path: '/chat', label: '问数对话' },

@@ -1,7 +1,7 @@
 /** 指令示范：按页面上下文推荐可点击的示例指令（全部可被规则引擎/LLM 理解） */
 export function openAi(prefill = '') {
   const q = prefill ? `?prefill=${encodeURIComponent(prefill)}` : ''
-  location.hash = `#/ai-assistant${q}`
+  location.hash = `#/chat${q}`
 }
 
 /** 指令示范：按页面上下文推荐可点击的示例指令（全部可被规则引擎/LLM 理解） */
@@ -37,12 +37,6 @@ export const PAGE_SUGGESTIONS = {
     '把上一条查询发布成API',
   ],
   '/chat': [
-    '统计每天订单量',
-    '找订单相关的表',
-    '看看监控情况',
-    '你能做什么',
-  ],
-  '/ai-assistant': [
     '把 demo_source 的 orders 表每天凌晨2点同步到 demo_warehouse 的 ods_orders',
     '基于 ods_orders 做 dwd 订单明细，剔除测试账号，每天凌晨3点跑',
     '统计每天订单量',

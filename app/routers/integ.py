@@ -163,31 +163,15 @@ def trial(job_id: int, request: Request, dry_run: bool = True,
 @router.get("/jobs/{job_id}/trend")
 def job_trend(job_id: int, limit: int = 12,
               user: User = Depends(current_user), db: Session = Depends(get_db)):
-    """同步趋势：最近 N 次实例的状态/耗时/写入行数（断流检测与趋势图数据源）。"""
+    """同步趋势：最近 N 次实例的状态/耗时/写入行数（核心在 integ_service.job_trend_items）。"""
     job = db.get(SyncJob, job_id)
     if not job:
         raise HTTPException(404, "任务不存在")
     wf = db.query(Workflow).filter(Workflow.sync_job_id == job.id).first()
     if not wf:
         return {"items": []}
-    insts = (db.query(TaskInstance)
-               .filter(TaskInstance.workflow_id == wf.id)
-               .order_by(TaskInstance.id.desc())
-               .limit(max(1, min(limit, 50))).all())
-    items = []
-    for i in insts:
-        rows = -1
-        for r in db.query(NodeRun).filter(NodeRun.instance_id == i.id,
-                                          NodeRun.rows_written >= 0).all():
-            rows = max(rows, r.rows_written)
-        dur_ms = 0
-        if i.started_at and i.finished_at:
-            dur_ms = int((i.finished_at - i.started_at).total_seconds() * 1000)
-        items.append({"instance_id": i.id, "status": i.status,
-                      "trigger_type": i.trigger_type,
-                      "finished_at": str(i.finished_at or ""),
-                      "duration_ms": dur_ms, "rows_written": rows})
-    return {"workflow_id": wf.id, "items": list(reversed(items))}
+    return {"workflow_id": wf.id,
+            "items": integ_service.job_trend_items(db, wf, limit=limit)}
 
 
 @router.post("/increment/resolve")
@@ -209,30 +193,14 @@ def reset_target(job_id: int, request: Request, drop: bool = False,
     if not job:
         raise HTTPException(404, "任务不存在")
     ensure_can_manage(user, job.owner_id, "该任务")  # 破坏性操作：与其他写端点同款属主校验
-    dst = db.get(DataSource, job.target_datasource_id)
-    if not dst or not job.target_table:
-        raise HTTPException(400, "任务无目标表，无需重置")
-    from ..services.engine_registry import get_engine
-    from sqlalchemy import text as _t
-    eng = get_engine(dst)
-    q = integ_service._qi(dst.type, job.target_table)
-    mode = "drop" if drop else "truncate"
     try:
-        stmt = (f"DROP TABLE IF EXISTS {q}" if drop else f"TRUNCATE TABLE {q}")
-        with eng.begin() as conn:
-            conn.execute(_t(stmt))
-    except Exception:
-        # TRUNCATE 不可用时退化为 DELETE（sqlite 等不支持 TRUNCATE 的引擎）
-        try:
-            with eng.begin() as conn:
-                conn.execute(_t(f"DELETE FROM {q}"))
-            mode = "delete"
-        except Exception as e:
-            raise HTTPException(400, f"重置目标表失败: {e}")
+        result = integ_service.reset_target_impl(db, job, drop=drop)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
     audit_svc.log(db, user, "integ.reset_target", "sync_job", job.id,
-                  {"mode": mode, "table": job.target_table,
-                   "datasource": dst.name}, ip=client_ip(request))
-    return {"ok": True, "mode": mode, "table": job.target_table}
+                  {"mode": result["mode"], "table": result["table"],
+                   "datasource": result["datasource"]}, ip=client_ip(request))
+    return {"ok": True, "mode": result["mode"], "table": result["table"]}
 
 
 @router.post("/jobs/{job_id}/publish")

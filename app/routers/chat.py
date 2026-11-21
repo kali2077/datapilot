@@ -148,6 +148,7 @@ def get_messages(sid: int, user: User = Depends(current_user), db: Session = Dep
     return [{"id": m.id, "role": m.role, "content": m.content,
              "card": (m.meta or {}).get("card"),
              "attachments": (m.meta or {}).get("attachments") or [],
+             "tool_trace": (m.meta or {}).get("tool_trace") or [],
              "confirm_token": m.confirm_token if m.confirm_status == "pending" else None,
              "confirm_status": m.confirm_status, "provider": m.llm_provider,
              "ts": str(m.ts)} for m in msgs]

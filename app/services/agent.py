@@ -161,7 +161,7 @@ def t_get_schema(db: Session, user, session_id: int, datasource="", table=""):
             "card": {"type": "schema", "table": table, "datasource": ds.name, "columns": col_list}}
 
 
-@tool("create_sync_job", "创建数据同步任务（草稿）：源表 -> 目标表，含调度与增量策略。返回试跑结果与确认卡片，需用户确认后才上线。",
+@tool("create_sync_job", "创建数据同步任务（草稿）：源表 -> 目标表，含调度/增量/合并键策略。返回试跑结果与确认卡片，需用户确认后才上线。",
       {"type": "object", "properties": {
           "source_datasource": {"type": "string"}, "source_table": {"type": "string"},
           "target_datasource": {"type": "string"}, "target_table": {"type": "string"},
@@ -169,13 +169,23 @@ def t_get_schema(db: Session, user, session_id: int, datasource="", table=""):
           "write_mode": {"type": "string", "enum": ["append", "truncate_insert", "replace"]},
           "increment_enabled": {"type": "boolean"},
           "increment_column": {"type": "string"},
+          "increment_mode": {"type": "string", "enum": ["max_value", "time_range"],
+                             "description": "max_value=断点续传（首次自动全量）；time_range=按表达式如 ${bizdate}"},
+          "increment_expr": {"type": "string", "description": "time_range 模式的时间表达式"},
+          "upsert_keys": {"type": "array", "items": {"type": "string"},
+                          "description": "合并键（目标列名）：同键数据合并不追加，更新型表用"},
+          "retries": {"type": "integer", "description": "失败重试次数（0-5，Airflow 模式下发）"},
+          "retry_delay_minutes": {"type": "integer"},
+          "pre_sql": {"type": "string"}, "post_sql": {"type": "string"},
           "partition_col": {"type": "string"}},
        "required": ["source_table", "target_table"]},
       confirm=True, min_role="engineer")
 def t_create_sync_job(db: Session, user, session_id: int, source_datasource="",
                       source_table="", target_datasource="", target_table="",
                       schedule_cron="", write_mode="append", increment_enabled=False,
-                      increment_column="", partition_col=""):
+                      increment_column="", increment_mode="max_value", increment_expr="",
+                      upsert_keys=None, retries=0, retry_delay_minutes=5,
+                      pre_sql="", post_sql="", partition_col=""):
     src = _get_ds(db, source_datasource)
     dst = _get_ds(db, target_datasource)
     if not src:
@@ -195,9 +205,14 @@ def t_create_sync_job(db: Session, user, session_id: int, source_datasource="",
     job.owner_id = user.id
     cfg = {"write_mode": write_mode or "append",
            "columns": [],
+           "upsert_keys": list(upsert_keys or []),
+           "retries": max(0, min(int(retries or 0), 5)),
+           "retry_delay_minutes": max(1, int(retry_delay_minutes or 5)),
            "increment": {"enabled": bool(increment_enabled), "column": increment_column or "",
-                         "mode": "max_value" if not increment_column else "max_value"},
-           "partition_col": partition_col or ""}
+                         "mode": increment_mode if increment_mode in ("max_value", "time_range") else "max_value",
+                         "expr": (increment_expr or "") if increment_mode == "time_range" else ""},
+           "partition_col": partition_col or "",
+           "pre_sql": pre_sql or "", "post_sql": post_sql or ""}
     if existed:
         cfg["columns"] = existed.config.get("columns", []) if existed.config else []
         job.config = cfg
@@ -235,11 +250,17 @@ def t_create_sync_job(db: Session, user, session_id: int, source_datasource="",
     return {"summary": desc,
             "card": {"type": "confirm", "action": "publish_sync_job",
                      "title": f"同步任务 {name}",
-                     "display": {"源": f"{src.name}.{source_table}",
-                                 "目标": f"{dst.name}.{target_table}",
-                                 "写入模式": cfg["write_mode"],
-                                 "增量": "开" if increment_enabled else "关",
-                                 "调度": cron or "手动"},
+                     "display": {
+                         "源": f"{src.name}.{source_table}",
+                         "目标": f"{dst.name}.{target_table}",
+                         "写入模式": cfg["write_mode"] + (f"（合并键: {', '.join(cfg['upsert_keys'])}）"
+                                                          if cfg["upsert_keys"] else ""),
+                         "增量": ("开 · " + ("按表达式 " + cfg["increment"]["expr"]
+                                             if cfg["increment"]["mode"] == "time_range"
+                                             else "断点续传"))
+                                if increment_enabled else "关",
+                         "重试": f"{cfg['retries']} 次 / {cfg['retry_delay_minutes']} 分钟",
+                         "调度": cron or "手动"},
                      "payload": {"job_id": job.id, "cron": cron},
                      "trial": trial, "issues": issues, "ddl": ddl},
             "confirm_token": token, "job_id": job.id}
@@ -514,6 +535,170 @@ def _find_wf(db: Session, name_or_id) -> Optional[Workflow]:
     return None
 
 
+def _find_sync_job(db: Session, name_or_id) -> Optional[SyncJob]:
+    if isinstance(name_or_id, int) or (isinstance(name_or_id, str) and name_or_id.isdigit()):
+        job = db.get(SyncJob, int(name_or_id))
+        if job:
+            return job
+    if name_or_id:
+        return db.query(SyncJob).filter(SyncJob.name == name_or_id).first()
+    return None
+
+
+@tool("compare_data", "比对同步任务的源/目标数据是否一致（sample=抽样差集；chunk=按合并键/增量列分块全量计数，键列需数值型）。",
+      {"type": "object", "properties": {
+          "job_name": {"type": "string", "description": "同步任务名（或任务 id）"},
+          "mode": {"type": "string", "enum": ["sample", "chunk"]},
+          "sample_rows": {"type": "integer"}},
+       "required": ["job_name"]}, min_role="analyst")
+def t_compare_data(db: Session, user, session_id: int, job_name="", mode="sample", sample_rows=200):
+    job = _find_sync_job(db, job_name)
+    if not job:
+        names = "、".join(j.name for j in db.query(SyncJob).limit(10))
+        return {"summary": f"同步任务不存在: {job_name}。现有: {names or '（无）'}", "error": True}
+    try:
+        rep = integ_service.compare_impl(db, job, sample_rows=int(sample_rows or 200), mode=mode)
+    except ValueError as e:
+        return {"summary": f"比对失败: {e}", "error": True}
+    s, t = rep["sample"], rep["target"]
+    lines = [f"源 {rep['source']['rows']} 行 / 目标 {rep['target']['rows']} 行（差 {rep['row_diff']}）。"
+             f"抽样 {s['rows']} 行：仅源有 {s['only_in_source']}、仅目标有 {s['only_in_target']}。"]
+    if rep.get("chunk_diffs") is not None:
+        lines.append(f"分块校验：{rep['chunks_ok']}/{rep['chunks_total']} 块一致"
+                     + (f"，差异区间 {rep['chunk_diffs'][:3]}" if rep["chunk_diffs"] else ""))
+    lines.append("✅ 源目一致" if rep["consistent"] else "⚠️ 存在差异")
+    return {"summary": "\n".join(lines),
+            "card": {"type": "compare", "report": rep}}
+
+
+@tool("job_trend", "查询同步任务最近的运行趋势（状态/写入行数/耗时），用于判断断流或性能退化。",
+      {"type": "object", "properties": {
+          "job_name": {"type": "string", "description": "同步任务名（或任务 id）"},
+          "limit": {"type": "integer", "description": "最近几次，默认 10"}},
+       "required": ["job_name"]}, min_role="viewer")
+def t_job_trend(db: Session, user, session_id: int, job_name="", limit=10):
+    job = _find_sync_job(db, job_name)
+    if not job:
+        names = "、".join(j.name for j in db.query(SyncJob).limit(10))
+        return {"summary": f"同步任务不存在: {job_name}。现有: {names or '（无）'}", "error": True}
+    wf = db.query(Workflow).filter(Workflow.sync_job_id == job.id).first()
+    if not wf:
+        return {"summary": f"任务 [{job.name}] 尚未发布上线，无运行记录。", "error": True}
+    items = integ_service.job_trend_items(db, wf, limit=int(limit or 10))
+    if not items:
+        return {"summary": f"任务 [{job.name}] 还没有运行实例。", "card": {"type": "text"}}
+    halt = [t for t in items if t["rows_written"] == 0]
+    lines = [f"最近 {len(items)} 次运行：" + "；".join(
+        f"#{t['instance_id']} {t['status']}({t['rows_written'] if t['rows_written'] >= 0 else '?'}行)"
+        for t in items[-5:])]
+    if halt:
+        lines.append(f"⚠️ 发现 {len(halt)} 次写入 0 行，疑似源端断流——建议在监控告警页配置 sync_halt 断流规则。")
+    ok_rows = [t["rows_written"] for t in items if t["rows_written"] > 0]
+    if ok_rows:
+        lines.append(f"写入行数范围 {min(ok_rows)}~{max(ok_rows)}。")
+    return {"summary": "\n".join(lines),
+            "card": {"type": "trend", "items": items}}
+
+
+@tool("list_asset_changes", "查询资产变更自动巡检记录（表增删/字段增删改/行数变化），可按数据源过滤。",
+      {"type": "object", "properties": {
+          "datasource": {"type": "string", "description": "数据源名（可选）"},
+          "change_type": {"type": "string", "description": "可选：table_added/table_removed/column_added/column_removed/column_altered/comment_changed/row_count_changed"},
+          "limit": {"type": "integer"}}},
+      min_role="viewer")
+def t_list_asset_changes(db: Session, user, session_id: int, datasource="", change_type="", limit=15):
+    from ..models import MetaChange, DataSource as _DS
+    q = db.query(MetaChange)
+    if datasource:
+        ds = db.query(_DS).filter(_DS.name == datasource).first()
+        if not ds:
+            return {"summary": f"数据源不存在: {datasource}", "error": True}
+        q = q.filter(MetaChange.datasource_id == ds.id)
+    if change_type:
+        q = q.filter(MetaChange.change_type == change_type)
+    rows = q.order_by(MetaChange.detected_at.desc(), MetaChange.id.desc()).limit(max(1, min(limit or 15, 50))).all()
+    if not rows:
+        return {"summary": "巡检暂未发现变更记录（采集时自动对比上次快照生成）。", "card": {"type": "text"}}
+    ds_names = {d.id: d.name for d in db.query(_DS).all()}
+    lines = [f"· [{c.change_type}] {ds_names.get(c.datasource_id, '?')}.{c.table_name}"
+             for c in rows]
+    danger = sum(1 for c in rows if c.change_type in ("table_removed", "column_removed", "column_altered"))
+    head = f"最近 {len(rows)} 条变更" + (f"（含 {danger} 条危险结构变更）" if danger else "") + "："
+    return {"summary": head + "\n" + "\n".join(lines), "card": {"type": "text"}}
+
+
+@tool("reset_target_table", "重置同步任务的目标表（清空数据，下次同步重新全量、重建增量断点）。破坏性操作，需用户确认。",
+      {"type": "object", "properties": {
+          "job_name": {"type": "string", "description": "同步任务名（或任务 id）"},
+          "drop": {"type": "boolean", "description": "true=连表结构一起删（列映射变更后用）"}},
+       "required": ["job_name"]},
+      confirm=True, min_role="engineer")
+def t_reset_target_table(db: Session, user, session_id: int, job_name="", drop=False):
+    job = _find_sync_job(db, job_name)
+    if not job:
+        names = "、".join(j.name for j in db.query(SyncJob).limit(10))
+        return {"summary": f"同步任务不存在: {job_name}。现有: {names or '（无）'}", "error": True}
+    if not job.target_table:
+        return {"summary": "任务无目标表，无需重置。", "error": True}
+    token = _secrets.token_hex(16)
+    return {"summary": (f"准备重置 [{job.name}] 的目标表 {job.target_table}"
+                        f"（{'连表结构删除' if drop else '仅清空数据'}），下次同步将重新全量。请确认。"),
+            "card": {"type": "confirm", "action": "reset_target_table",
+                     "title": f"重置目标表：{job.target_table}",
+                     "display": {"任务": job.name, "目标表": job.target_table,
+                                 "方式": "DROP（重建）" if drop else "TRUNCATE（保留结构）"},
+                     "payload": {"job_id": job.id, "drop": bool(drop)}},
+            "confirm_token": token, "job_id": job.id}
+
+
+@tool("create_monitor_rule", "创建数据监控规则（8 类：行数波动/阈值/空值率/唯一性/延迟/自定义SQL/任务时长/同步断流）。返回确认卡片，需用户确认后创建。",
+      {"type": "object", "properties": {
+          "name": {"type": "string"}, "rule_type": {"type": "string",
+                                                    "enum": ["row_count_fluctuation", "row_count_threshold",
+                                                             "null_rate", "unique_check", "freshness",
+                                                             "sql_check", "task_duration", "sync_halt"]},
+          "datasource": {"type": "string", "description": "数据源名（task_duration/sync_halt 不需要）"},
+          "table_name": {"type": "string"}, "column_name": {"type": "string"},
+          "params": {"type": "object", "description": "规则参数，如 {pct:30}/{min,max}/{hours}/{sql}/{workflow_name,max_minutes}/{workflow_name,min_rows}"},
+          "cron": {"type": "string", "description": "检查调度，如 0 6 * * *"},
+          "severity": {"type": "string", "enum": ["warning", "critical"]}},
+       "required": ["name", "rule_type"]},
+      confirm=True, min_role="engineer")
+def t_create_monitor_rule(db: Session, user, session_id: int, name="", rule_type="",
+                          datasource="", table_name="", column_name="", params=None,
+                          cron="0 6 * * *", severity="warning"):
+    from . import monitor_service
+    from ..models import MonitorRule
+    if rule_type not in monitor_service.RULE_TYPES:
+        return {"summary": f"未知规则类型: {rule_type}。支持: {'、'.join(monitor_service.RULE_TYPES)}", "error": True}
+    if db.query(MonitorRule).filter(MonitorRule.name == name).first():
+        return {"summary": f"规则名已存在: {name}", "error": True}
+    ds_name = ""
+    if rule_type not in ("task_duration", "sync_halt"):
+        ds = _get_ds(db, datasource)
+        if not ds:
+            return {"summary": f"数据源不存在: {datasource}。现有: " +
+                               "、".join(d.name for d in db.query(DataSource).all()), "error": True}
+        ds_name = ds.name
+    if cron:
+        ok, msg = sched_service.validate_cron(cron)
+        if not ok:
+            return {"summary": msg, "error": True}
+    token = _secrets.token_hex(16)
+    payload = {"name": name, "rule_type": rule_type,
+               "datasource_id": 0 if rule_type in ("task_duration", "sync_halt") else -1,
+               "datasource_name": ds_name, "table_name": table_name or "",
+               "column_name": column_name or "", "params": params or {},
+               "cron": cron or "0 6 * * *", "severity": severity or "warning"}
+    return {"summary": (f"准备创建监控规则 [{name}]（{rule_type}，调度 {payload['cron']}）。请确认。"),
+            "card": {"type": "confirm", "action": "create_monitor_rule",
+                     "title": f"监控规则 {name}",
+                     "display": {"类型": rule_type, "对象": ds_name + (f".{table_name}" if table_name else "") or "—",
+                                 "调度": payload["cron"], "严重度": payload["severity"]},
+                     "payload": payload},
+            "confirm_token": token}
+
+
 TOOL_MAP = {t["name"]: t for t in TOOLS}
 
 
@@ -566,22 +751,56 @@ def execute_confirmation(db: Session, user, action: str, payload: dict) -> dict:
         db.commit()
         return {"summary": f"✅ API [{api.code}] 已发布。调用方式见数据服务页面。",
                 "card": {"type": "api_link", "api_id": api.id, "code": api.code}}
+    if action == "reset_target_table":
+        job = db.get(SyncJob, payload["job_id"])
+        if not job:
+            return {"summary": "任务不存在", "error": True}
+        try:
+            result = integ_service.reset_target_impl(db, job, drop=bool(payload.get("drop")))
+        except ValueError as e:
+            return {"summary": f"重置失败: {e}", "error": True}
+        return {"summary": (f"✅ [{job.name}] 目标表 {result['table']} 已重置（{result['mode']}），"
+                            "下次同步将重新全量、重建增量断点。")}
+    if action == "create_monitor_rule":
+        from . import monitor_service
+        from ..models import MonitorRule, DataSource as _DS
+        p = payload or {}
+        if p.get("rule_type") not in monitor_service.RULE_TYPES:
+            return {"summary": f"未知规则类型: {p.get('rule_type')}", "error": True}
+        ds_id = 0
+        if p.get("rule_type") not in ("task_duration", "sync_halt"):
+            ds = db.query(_DS).filter(_DS.name == p.get("datasource_name", "")).first()
+            if not ds:
+                return {"summary": f"数据源不存在: {p.get('datasource_name')}", "error": True}
+            ds_id = ds.id
+        if db.query(MonitorRule).filter(MonitorRule.name == p.get("name")).first():
+            return {"summary": f"规则名已存在: {p.get('name')}", "error": True}
+        rule = MonitorRule(name=p["name"], rule_type=p["rule_type"], datasource_id=ds_id,
+                           table_name=p.get("table_name", ""), column_name=p.get("column_name", ""),
+                           params=p.get("params") or {}, cron=p.get("cron") or "0 6 * * *",
+                           severity=p.get("severity") or "warning", enabled=True,
+                           group_name="AI 助手", mute_hours=24, owner_id=user.id)
+        db.add(rule)
+        db.commit()
+        monitor_service.apply_schedule(db, rule)
+        return {"summary": (f"✅ 监控规则 [{rule.name}] 已创建并注册调度 {rule.cron}。"
+                            "可在数据监控告警页调整阈值/静默窗口。"),
+                "card": {"type": "job_link", "workflow_id": 0, "monitor_rule_id": rule.id}}
     return {"summary": f"未知确认动作: {action}", "error": True}
 
 
 # ---------------------------------------------------------------- RAG 注入
 
 PAGE_HINTS = {
-    "/ai-assistant": "用户在【AI 助手】中心（平台全能力对话入口），请直接响应指令并主动推荐可用能力。",
     "/integration": "用户正在【数据集成】页面，可引导使用 create_sync_job 创建同步任务。",
     "/workflows": "用户正在【工作流开发】页面，可引导使用 create_etl_job 创建 ETL 任务。",
     "/ops": "用户正在【调度运维】页面，可用 get_instance_detail 诊断实例、用 run/pause/resume/rerun_job 运维。",
-    "/monitoring": "用户正在【数据监控告警】页面，可用 monitor_overview 查看异常规则、run_monitor_check 触发检查。",
+    "/monitoring": "用户正在【数据监控告警】页面，可用 monitor_overview 查看异常规则、run_monitor_check 触发检查、create_monitor_rule 创建规则。",
     "/assets": "用户正在【数据资产地图】页面，可用 search_metadata/get_table_schema 探查表与血缘。",
     "/query": "用户正在【数据查询】页面，可用 query_data 帮其写并执行只读查询。",
     "/apis": "用户正在【数据服务】页面，可用 publish_api 把查询发布为 API。",
     "/datasources": "用户正在【数据源管理】页面，新建数据源/采集元数据请在页面上操作，AI 可解释后续步骤。",
-    "/chat": "用户正在【智能问数】页面。",
+    "/chat": "用户在【智能问数】对话（平台全能力入口）：查数、建同步/ETL、比对数据、查趋势断流、建监控规则、重置目标表等均可直接执行；变更类操作需确认卡。",
 }
 
 
@@ -765,6 +984,7 @@ def chat_stream(db: Session, user, session_id: int, text: str, page: str = "",
                   if _tool_allowed(user, t["min_role"])]
     last_result = None
     reply = None
+    tool_trace = []  # 本轮会话的工具调用摘要（持久化到消息 meta，刷新后可见）
     for round_i in range(MAX_ROUNDS):
         if rule_mode and round_i > 0:
             break  # 规则引擎单轮：工具结果直接汇总
@@ -797,6 +1017,7 @@ def chat_stream(db: Session, user, session_id: int, text: str, page: str = "",
                     tool_out = {"summary": f"工具执行异常: {e}", "error": True}
                 _audit_ai(db, user, tc.name, tc.arguments, tool_out)
             last_result = tool_out
+            tool_trace.append({"name": tc.name, "summary": (tool_out.get("summary", ""))[:200]})
             yield {"type": "tool_end", "name": tc.name,
                    "summary": tool_out.get("summary", ""), "error": bool(tool_out.get("error"))}
             assistant_tool_calls.append({"id": tc.id, "type": "function",
@@ -831,6 +1052,8 @@ def chat_stream(db: Session, user, session_id: int, text: str, page: str = "",
             meta["sql"] = last_result["last_sql"]
         if last_result.get("error"):
             meta["error"] = True
+        if tool_trace:
+            meta["tool_trace"] = tool_trace
         msg.meta = meta
     if last_result and last_result.get("confirm_token"):
         msg.confirm_token = last_result["confirm_token"]
@@ -839,7 +1062,8 @@ def chat_stream(db: Session, user, session_id: int, text: str, page: str = "",
     db.commit()
     yield {"type": "done", "message_id": msg.id, "content": reply, "card": (msg.meta or {}).get("card"),
            "confirm_token": msg.confirm_token, "confirm_status": msg.confirm_status,
-           "provider": msg.llm_provider, "error": (msg.meta or {}).get("error", False)}
+           "provider": msg.llm_provider, "error": (msg.meta or {}).get("error", False),
+           "tool_trace": tool_trace}
 
 
 def _stream_llm(provider, messages, tool_specs):

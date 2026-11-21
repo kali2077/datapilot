@@ -53,7 +53,15 @@
                     <div v-else class="muted stream-text">思考中<span class="stream-cursor">…</span></div>
                   </template>
                   <template v-else>
-                    <div class="ai-content">{{ m.content }}</div>
+                    <el-collapse v-if="m.tool_trace?.length" class="trace-collapse">
+                      <el-collapse-item :title="`执行过程（${m.tool_trace.length} 步工具调用）`">
+                        <div v-for="(t, ti) in m.tool_trace" :key="ti" class="trace-item">
+                          <el-tag size="small" effect="plain" class="mono">{{ t.name }}</el-tag>
+                          <span class="muted tiny">{{ t.summary }}</span>
+                        </div>
+                      </el-collapse-item>
+                    </el-collapse>
+                    <div class="ai-content md" v-html="renderMd(m.content)" />
                     <ChatCard v-if="m.card && m.card.type" :msg="m" @confirm="doConfirm(m)" @cancel="doCancel(m)" />
                     <div class="ai-meta" v-if="m.provider || m.ts || m.content">
                       <el-tooltip content="复制回复" placement="top">
@@ -86,9 +94,11 @@
 </template>
 
 <script setup>
-import { nextTick, onMounted, reactive, ref } from 'vue'
+import { nextTick, onMounted, reactive, ref, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { DocumentCopy } from '@element-plus/icons-vue'
+import MarkdownIt from 'markdown-it'
 import http, { errMsg, nowTs, postSSE } from '../api'
 import { copyText } from '../utils/clipboard'
 import { useAuthStore } from '../store'
@@ -96,7 +106,14 @@ import ChatCard from '../components/ChatCard.vue'
 import ChatInput from '../components/ChatInput.vue'
 import PromptChips from '../components/PromptChips.vue'
 
+const route = useRoute()
 const auth = useAuthStore()
+
+// Markdown 渲染（默认转义内联 HTML，防 XSS）；AI 回复正文用，流式增量仍为纯文本
+const md = new MarkdownIt({ breaks: true, linkify: true })
+function renderMd(text) {
+  return md.render(text || '')
+}
 const sessions = ref([])
 const sessLoading = ref(false)
 const creating = ref(false)
@@ -209,6 +226,7 @@ async function onSend({ text, attachments = [] }) {
       role: 'assistant',
       content: done.content || '',
       card: done.card || null,
+      tool_trace: done.tool_trace || [],
       confirm_token: done.confirm_token || null,
       confirm_status: done.confirm_status || '',
       provider: done.provider || '',
@@ -274,5 +292,61 @@ onMounted(async () => {
   } else {
     await newSession()
   }
+  applyPrefill()
 })
+
+// 场景按钮（AI 建同步/AI 诊断…）经 openAi() 带 ?prefill= 跳入，预填输入框不自动发送
+function applyPrefill() {
+  const pre = route.query.prefill
+  if (pre) {
+    inputRef.value?.setText(String(pre))
+  }
+}
+
+watch(() => route.query.prefill, () => applyPrefill())
 </script>
+
+<style scoped>
+.trace-collapse {
+  margin-bottom: 8px;
+  border: none;
+}
+.trace-collapse :deep(.el-collapse-item__header) {
+  height: 30px;
+  font-size: 12px;
+  color: var(--dp-text-2);
+}
+.trace-collapse :deep(.el-collapse-item__wrap) {
+  border-bottom: none;
+}
+.trace-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 2px 0;
+}
+.ai-content.md :deep(p) {
+  margin: 0 0 8px;
+}
+.ai-content.md :deep(pre) {
+  background: var(--dp-bg-2, #f6f7f9);
+  padding: 8px 10px;
+  border-radius: 6px;
+  overflow-x: auto;
+  font-size: 12.5px;
+}
+.ai-content.md :deep(code) {
+  font-family: var(--font-mono, monospace);
+  font-size: 12.5px;
+}
+.ai-content.md :deep(table) {
+  border-collapse: collapse;
+  margin: 6px 0;
+}
+.ai-content.md :deep(th),
+.ai-content.md :deep(td) {
+  border: 1px solid var(--dp-border, #e4e7ed);
+  padding: 4px 8px;
+  font-size: 12.5px;
+}
+</style>

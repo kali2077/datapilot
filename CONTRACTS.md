@@ -130,11 +130,16 @@ Base URL: `http://127.0.0.1:8100`（开发模式 Vite proxy 到 8100）
   - **静默窗口**：mute_hours 内同一规则不重复通知（检查记录照常落库，message 追加"静默期内"）
 
 ### 6 智能问数 / AI 对话（所有登录用户）
-前端入口：左侧导航「智能应用」→「智能问数」**子导航**（问数对话 /chat · SQL 示例 /fewshots · 术语库 /glossary）
-与「AI 助手」/ai-assistant；顶部标签条可多页并存切换。
+前端入口：左侧导航「智能应用」→「智能问数」**子导航**（问数对话 /chat · SQL 示例 /fewshots · 术语库 /glossary）。
+/openai 场景按钮统一跳 /chat?prefill=…；/ai-assistant 旧路由 302 兼容指向同一组件。
 SQL 示例与术语库为问数 RAG 知识库管理页（术语族展开 + few-shot 注入见 build_context）。
+- Agent 工具集（19 个，function-calling，逐工具角色管控 + 审计）：query_data / search_metadata /
+  get_table_schema / create_sync_job（含增量模式/表达式/合并键/重试/pre-post_sql）/ create_etl_job /
+  run_job / pause_job / resume_job / rerun_job / publish_api / get_instance_detail / monitor_overview /
+  run_monitor_check / create_monitor_rule（confirm） / compare_data（sample/chunk） / job_trend /
+  list_asset_changes / reset_target_table（confirm）
 - GET `/api/chat/sessions`；POST `/api/chat/sessions`；DELETE `/api/chat/sessions/{id}`（级联删除消息与附件文件）
-- GET `/api/chat/sessions/{id}/messages` → [{id,role,content,card,attachments,confirm_token,confirm_status,provider,ts}]
+- GET `/api/chat/sessions/{id}/messages` → [{id,role,content,card,attachments,tool_trace,confirm_token,confirm_status,provider,ts}]
 - POST `/api/chat/sessions/{id}/send` {text, page?, attachments?: [attachment_id]} → {message_id,content,card,confirm_token,confirm_status,provider,error}
   - page: 当前页面路由（如 /integration），注入 system 提示让 AI 感知上下文
   - attachments: 附件 id 列表（≤6，须属于当前会话；文本/解析类内容注入 prompt，图片走 vision content）

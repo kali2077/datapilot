@@ -882,3 +882,132 @@ def delete_job(db: Session, job: SyncJob) -> dict:
     db.delete(job)
     db.commit()
     return {"ok": True, "name": name, "workflow": wf_info}
+
+
+def reset_target_impl(db: Session, job: SyncJob, drop: bool = False) -> dict:
+    """重置目标表：TRUNCATE（不支持则退化 DELETE）；drop=True 连结构删（下次自动重建）。
+
+    供 reset_target 路由与 Agent reset_target_table 工具共用；失败抛 ValueError。
+    """
+    dst = db.get(DataSource, job.target_datasource_id)
+    if not dst or not job.target_table:
+        raise ValueError("任务无目标表，无需重置")
+    from .engine_registry import get_engine
+    from sqlalchemy import text as _t
+    eng = get_engine(dst)
+    q = _qi(dst.type, job.target_table)
+    mode = "drop" if drop else "truncate"
+    try:
+        stmt = (f"DROP TABLE IF EXISTS {q}" if drop else f"TRUNCATE TABLE {q}")
+        with eng.begin() as conn:
+            conn.execute(_t(stmt))
+    except Exception:
+        try:
+            with eng.begin() as conn:
+                conn.execute(_t(f"DELETE FROM {q}"))
+            mode = "delete"
+        except Exception as e:
+            raise ValueError(f"重置目标表失败: {e}")
+    return {"ok": True, "mode": mode, "table": job.target_table, "datasource": dst.name}
+
+
+def job_trend_items(db: Session, wf: Workflow, limit: int = 12) -> list:
+    """最近 N 次实例的状态/触发/耗时/写入行数（断流检测与趋势图数据源）。"""
+    from ..models import TaskInstance, NodeRun
+    insts = (db.query(TaskInstance)
+               .filter(TaskInstance.workflow_id == wf.id)
+               .order_by(TaskInstance.id.desc())
+               .limit(max(1, min(limit, 50))).all())
+    items = []
+    for i in insts:
+        rows = -1
+        for r in db.query(NodeRun).filter(NodeRun.instance_id == i.id,
+                                          NodeRun.rows_written >= 0).all():
+            rows = max(rows, r.rows_written)
+        dur_ms = 0
+        if i.started_at and i.finished_at:
+            dur_ms = int((i.finished_at - i.started_at).total_seconds() * 1000)
+        items.append({"instance_id": i.id, "status": i.status,
+                      "trigger_type": i.trigger_type,
+                      "finished_at": str(i.finished_at or ""),
+                      "duration_ms": dur_ms, "rows_written": rows})
+    return list(reversed(items))
+
+
+def compare_impl(db: Session, job: SyncJob, sample_rows: int = 200,
+                 mode: str = "sample") -> dict:
+    """数据比对核心（路由与 Agent compare_data 工具共用）。
+
+    sample：行数 + 抽样元组差集；chunk：按合并键/增量列分 10 块逐块计数定位差异区间。
+    失败抛 ValueError（路由转 400）。
+    """
+    from collections import Counter
+    from .engine_registry import run_query
+    if not job.source_table and not job.source_query:
+        raise ValueError("任务无源表，无法比对")
+    if mode == "chunk" and not job.source_table:
+        raise ValueError("自定义查询任务无源表键列，仅支持抽样比对")
+    src = db.get(DataSource, job.source_datasource_id)
+    dst = db.get(DataSource, job.target_datasource_id)
+    if not src or not dst:
+        raise ValueError("源/目标数据源不存在")
+    n = max(10, min(sample_rows, 5000))
+
+    def count(ds, table, where=""):
+        cols, rows, _ = run_query(ds, f"SELECT COUNT(*) AS c FROM {_qi(ds.type, table)}{where}",
+                                  max_rows=1, timeout_s=120)
+        return int(rows[0][0])
+
+    src_cnt = count(src, job.source_table)
+    dst_cnt = count(dst, job.target_table)
+    out = {
+        "source": {"datasource": src.name, "table": job.source_table, "rows": src_cnt},
+        "target": {"datasource": dst.name, "table": job.target_table, "rows": dst_cnt},
+        "row_diff": src_cnt - dst_cnt,
+        "mode": mode,
+    }
+    consistent = src_cnt == dst_cnt
+
+    if mode == "chunk" and job.source_table:
+        cfg = job.config or {}
+        key = next((k for k in (cfg.get("upsert_keys") or [])
+                    if k in {c["target"] for c in (cfg.get("columns") or [])}), None)
+        key = key or (cfg.get("increment") or {}).get("column") \
+            or ((cfg.get("columns") or [{}])[0].get("target"))
+        if not key:
+            raise ValueError("无可用键列（合并键/增量列/列映射均空），无法分块比对")
+        _, s_minmax, _ = run_query(src, f"SELECT MIN({_qi(src.type, key)}), MAX({_qi(src.type, key)})"
+                                        f" FROM {_qi(src.type, job.source_table)}", max_rows=1, timeout_s=120)
+        lo, hi = s_minmax[0][0], s_minmax[0][1]
+        chunks, chunk_diffs, ok_chunks = 10, [], 0
+        try:
+            step = (int(hi) - int(lo) + 1) / chunks
+        except (ValueError, TypeError):
+            raise ValueError(f"键列 {key} 需为数值类型才能分块比对")
+        for i in range(chunks):
+            a = int(lo) + int(i * step)
+            b = int(lo) + int((i + 1) * step) - (1 if i < chunks - 1 else 0)
+            w = f" WHERE {_qi(src.type, key)} BETWEEN {a} AND {b}"
+            sc_i = count(src, job.source_table, w)
+            dc_i = count(dst, job.target_table, w.replace(_qi(src.type, key), _qi(dst.type, key)))
+            if sc_i == dc_i:
+                ok_chunks += 1
+            else:
+                chunk_diffs.append({"range": f"[{a}, {b}]", "source": sc_i, "target": dc_i})
+        out.update({"chunk_key": key, "chunks_total": chunks, "chunks_ok": ok_chunks,
+                    "chunk_diffs": chunk_diffs})
+        consistent = consistent and not chunk_diffs
+
+    _, s_rows, _ = run_query(src, f"SELECT * FROM {_qi(src.type, job.source_table)} LIMIT {n}",
+                             max_rows=n, timeout_s=120)
+    _, d_rows, _ = run_query(dst, f"SELECT * FROM {_qi(dst.type, job.target_table)} LIMIT {n}",
+                             max_rows=n, timeout_s=120)
+    sc, dc = Counter(tuple(str(v) for v in r) for r in s_rows), \
+        Counter(tuple(str(v) for v in r) for r in d_rows)
+    only_src = list((sc - dc).elements())
+    only_dst = list((dc - sc).elements())
+    out["sample"] = {"rows": n, "only_in_source": len(only_src), "only_in_target": len(only_dst),
+                     "src_examples": [list(r)[:6] for r in only_src[:5]],
+                     "dst_examples": [list(r)[:6] for r in only_dst[:5]]}
+    out["consistent"] = consistent and not only_src and not only_dst
+    return out
