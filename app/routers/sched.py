@@ -42,6 +42,9 @@ def _normalize_upstream(db: Session, wf: Workflow) -> list:
     problems = []
     nodes_all = (db.query(WorkflowNode).filter(WorkflowNode.workflow_id == wf.id)
                    .order_by(WorkflowNode.ordinal).all())
+    names = [n.name for n in nodes_all if n.name]
+    if len(names) != len(set(names)):
+        problems.append("存在同名节点，名字上游引用将解析到其中一个（建议节点命名唯一）")
     name_map = {n.name: n.id for n in nodes_all if n.name}
     id_set = set(name_map.values())
     for node in nodes_all:
@@ -67,22 +70,24 @@ def _normalize_upstream(db: Session, wf: Workflow) -> list:
 
 
 def _validate_wf_nodes(db: Session, wf: Workflow) -> list:
-    """SQL 节点校验（数据源存在性 + ETL SQL 合法性）；返回 problems。"""
+    """SQL 节点校验（数据源/ETL SQL）+ datax 节点同步任务存在性；返回 problems。"""
     problems = []
+    from ..models import DataSource, SyncJob
     for node in db.query(WorkflowNode).filter(WorkflowNode.workflow_id == wf.id):
-        if node.node_type != "sql":
-            continue
         cfg = node.config or {}
-        ds_id = cfg.get("datasource_id")
-        from ..models import DataSource
-        ds = db.get(DataSource, ds_id) if ds_id else None
-        if not ds:
-            problems.append(f"节点 {node.name}: 数据源不存在")
-            continue
-        ok, msg = sqlguard.check_etl_sql(cfg.get("sql", ""), cfg.get("target_table", ""),
-                                         sqlguard.dialect_of(ds.type))
-        if not ok:
-            problems.append(f"节点 {node.name}: {msg}")
+        if node.node_type == "sql":
+            ds_id = cfg.get("datasource_id")
+            ds = db.get(DataSource, ds_id) if ds_id else None
+            if not ds:
+                problems.append(f"节点 {node.name}: 数据源不存在")
+                continue
+            ok, msg = sqlguard.check_etl_sql(cfg.get("sql", ""), cfg.get("target_table", ""),
+                                             sqlguard.dialect_of(ds.type))
+            if not ok:
+                problems.append(f"节点 {node.name}: {msg}")
+        elif node.node_type == "datax" and cfg.get("sync_job_id"):
+            if not db.get(SyncJob, cfg["sync_job_id"]):
+                problems.append(f"节点 {node.name}: 绑定的同步任务 {cfg['sync_job_id']} 不存在")
     return problems
 
 
@@ -199,8 +204,12 @@ def update_wf(wf_id: int, req: WfUpdateReq, request: Request,
         problems = _replace_wf_nodes(db, wf, req.nodes)  # 整体替换节点（含归一化/环检测/SQL 校验）
     db.commit()
     sched_service.apply_schedule(db, wf)
+    # 审计摘要化：nodes 只记节点名列表（SQL 全文会撑爆审计行）
+    audit_payload = req.dict(exclude_none=True)
+    if "nodes" in audit_payload:
+        audit_payload["nodes"] = [n.get("name", "node") for n in audit_payload["nodes"]]
     audit_svc.log(db, user, "sched.wf.update", "workflow", wf.id,
-                  req.dict(exclude_none=True), ip=client_ip(request))
+                  audit_payload, ip=client_ip(request))
     out = _ser_wf(wf, db)
     out["problems"] = problems
     return out

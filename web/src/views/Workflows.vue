@@ -299,6 +299,7 @@ async function openEdit(row) {
   // 加载已保存的节点（SQL/Python 内容可编辑；upstream 存的是节点 id，下拉按名字绑定需映射回名字）
   try {
     const detail = await http.get(`/api/sched/workflows/${row.id}`)
+    if (dlg.id !== row.id) return  // 异步期间用户已切换到别的编辑目标，丢弃过期响应
     const nameById = {}
     detail.nodes.forEach((n) => { nameById[n.id] = n.name })
     form.nodes = (detail.nodes || []).map((n) => ({
@@ -421,6 +422,10 @@ async function save() {
     }
   } else {
     // 编辑：整体保存元数据 + 节点（含 SQL/Python 内容），后端整体替换并校验
+    if (!form.nodes.filter((n) => n.name.trim()).length) {
+      ElMessage.warning('请至少保留一个节点（含名称）')
+      return
+    }
     const payload = buildWfPayload()
     saving.value = true
     try {
