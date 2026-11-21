@@ -111,6 +111,14 @@ const auth = useAuthStore()
 
 // Markdown 渲染（默认转义内联 HTML，防 XSS）；AI 回复正文用，流式增量仍为纯文本
 const md = new MarkdownIt({ breaks: true, linkify: true })
+// 链接新窗口打开，避免把用户带离对话页
+const _defaultLink = md.renderer.rules.link_open
+  || ((tokens, idx, opts) => md.renderer.renderToken(tokens, idx, opts))
+md.renderer.rules.link_open = (tokens, idx, opts) => {
+  tokens[idx].attrSet('target', '_blank')
+  tokens[idx].attrSet('rel', 'noopener noreferrer')
+  return _defaultLink(tokens, idx, opts)
+}
 function renderMd(text) {
   return md.render(text || '')
 }

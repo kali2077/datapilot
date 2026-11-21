@@ -196,6 +196,9 @@ def t_create_sync_job(db: Session, user, session_id: int, source_datasource="",
                            "、".join(d.name for d in db.query(DataSource).all()), "error": True}
     name = f"sync_{source_table}_to_{target_table}"
     existed = db.query(SyncJob).filter(SyncJob.name == name).first()
+    if existed:
+        from ..deps import ensure_can_manage
+        ensure_can_manage(user, existed.owner_id, "该任务")  # 同名覆盖 = 修改他人配置，按属主拦
     job = existed or SyncJob(name=name)
     job.source_datasource_id = src.id
     job.source_table = source_table
@@ -545,12 +548,12 @@ def _find_sync_job(db: Session, name_or_id) -> Optional[SyncJob]:
     return None
 
 
-@tool("compare_data", "比对同步任务的源/目标数据是否一致（sample=抽样差集；chunk=按合并键/增量列分块全量计数，键列需数值型）。",
+@tool("compare_data", "比对同步任务的源/目标数据是否一致（sample=抽样差集；chunk=按合并键/增量列分块全量计数，键列需数值型）。抽样行不含脱敏，需 engineer 角色。",
       {"type": "object", "properties": {
           "job_name": {"type": "string", "description": "同步任务名（或任务 id）"},
           "mode": {"type": "string", "enum": ["sample", "chunk"]},
           "sample_rows": {"type": "integer"}},
-       "required": ["job_name"]}, min_role="analyst")
+       "required": ["job_name"]}, min_role="engineer")
 def t_compare_data(db: Session, user, session_id: int, job_name="", mode="sample", sample_rows=200):
     job = _find_sync_job(db, job_name)
     if not job:
@@ -638,6 +641,8 @@ def t_reset_target_table(db: Session, user, session_id: int, job_name="", drop=F
     if not job:
         names = "、".join(j.name for j in db.query(SyncJob).limit(10))
         return {"summary": f"同步任务不存在: {job_name}。现有: {names or '（无）'}", "error": True}
+    from ..deps import ensure_can_manage
+    ensure_can_manage(user, job.owner_id, "该任务")  # 破坏性操作：与路由同款属主校验
     if not job.target_table:
         return {"summary": "任务无目标表，无需重置。", "error": True}
     token = _secrets.token_hex(16)

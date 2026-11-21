@@ -18,8 +18,7 @@ from ..models import (User, DataSource, SyncJob, MaskRule, SysSetting, MetaTable
 from ..security import hash_password
 from ..services import audit as audit_svc
 from ..services import integ_service, sqlguard, mask_service
-from ..services.engine_registry import run_query, execute_write, get_engine, table_names
-from ..services.integ_service import _qi
+from ..services.engine_registry import execute_write, get_engine, table_names
 
 router = APIRouter(prefix="/api", tags=["tools"])
 
